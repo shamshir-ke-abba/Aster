@@ -1,5 +1,6 @@
 package com.aster.backend
 
+import com.aster.backend.database.MailboxDatabase
 import com.aster.backend.relay.MessageRelay
 import com.aster.backend.session.SessionManager
 import io.ktor.http.ContentType
@@ -20,7 +21,8 @@ import java.time.Duration
 
 fun Application.asterModule(
     sessionManager: SessionManager = SessionManager(),
-    relay: MessageRelay = MessageRelay(sessionManager)
+    mailboxDatabase: MailboxDatabase = MailboxDatabase(System.getenv("ASTER_DB_PATH") ?: ":memory:"),
+    relay: MessageRelay = MessageRelay(sessionManager, mailboxDatabase)
 ) {
     val logger = LoggerFactory.getLogger("AsterServer")
 

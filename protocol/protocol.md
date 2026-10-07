@@ -2,7 +2,7 @@
 
 ## Status
 
-Implemented & Hardened Wire Protocol (v0.1) — Realtime WebSocket Relay & State Machine.
+Implemented & Hardened Wire Protocol (v0.2) — Realtime WebSocket Relay with Durable Server-Side SQLite Mailbox & Offline Delivery.
 
 ---
 
@@ -12,7 +12,7 @@ Implemented & Hardened Wire Protocol (v0.1) — Realtime WebSocket Relay & State
 - **Client Message Identity**: Every message ID is client-generated (UUID/KSUID) and canonical. It is strictly preserved across the network, backend, and recipient client. No server-side ID aliasing occurs.
 - **Canonical Invariant**: *"One logical message ID represents one logical message."* Duplicate, retransmitted, or racing frames never produce duplicate records or state regression.
 - **Explicit JSON Schema & Bounds Enforcement**: All WebSocket messages are typed JSON objects with a mandatory `type` discriminator field and strict size limits.
-- **Zero-Cost Relay**: The server acts as an in-memory routing and acknowledgement coordinator. Room on Android is the single source of truth for message persistence.
+- **Durable Server-Side Mailbox**: The server guarantees durable SQLite storage for messages addressed to offline recipients. Messages remain stored until the recipient connects, receives them, and explicitly acknowledges receipt via `ACK_RECEIVED`.
 - **Future E2EE Compatibility**: The message payload structure is designed so `body` can seamlessly transition to an encrypted ciphertext container without changing message routing headers.
 
 ---
@@ -219,6 +219,30 @@ Incoming relayed messages are inserted via `insertMessageIfNotExists` (`OnConfli
 - **Monotonic Clock**: Rapid message sends enforce `lastSentTimestamp = maxOf(now, lastSentTimestamp + 1)` so consecutive messages in the same millisecond receive strictly increasing timestamps.
 - **Tie-Breaker Query**: Message sorting in queries uses `ORDER BY created_at ASC, id ASC`, ensuring deterministic order across reconnects and process restarts.
 
+### 5.3 Server-Side SQLite Mailbox Lifecycle & Offline Delivery
+- **Persistence Layer**: Messages accepted by the server are durably written to SQLite table `mailbox_messages` in a single ACID transaction before `MESSAGE_ACCEPTED` is transmitted to the sender.
+- **Server States**:
+  1. `QUEUED`: Stored in SQLite mailbox, waiting for recipient to connect and acknowledge delivery.
+  2. `DELIVERED`: Forwarded across recipient's active WebSocket connection (in-transit).
+  3. `ACKED`: Recipient has confirmed receipt and persistence via `ACK_RECEIVED(messageId = X)`.
+- **Offline Queuing**: When a recipient is offline at transmission time, the message remains in state `QUEUED` in SQLite.
+- **Reconnect Replay**:
+  - Immediately following successful client `AUTH` -> `AUTH_OK`, the server queries pending messages:
+    ```sql
+    SELECT * FROM mailbox_messages
+    WHERE recipient_user_id = ? AND delivery_state IN ('QUEUED', 'DELIVERED')
+    ORDER BY server_received_timestamp ASC, message_id ASC;
+    ```
+  - Messages are pushed in deterministic chronological order.
+  - Delivery state transitions to `DELIVERED`.
+- **Delivery Acknowledgement**:
+  - Upon recipient processing, recipient emits `ACK_RECEIVED(messageId)`.
+  - Server transitions state to `ACKED`. Duplicate `ACK_RECEIVED` frames are handled idempotently.
+  - ACKed messages are never redelivered on subsequent reconnects.
+- **Crash & Restart Invariant**:
+  - Mailbox state survives backend crashes, JVM terminations, and host reboots.
+  - On restart, the in-memory LRU cache is populated on-demand from SQLite queries, preventing duplicate acceptance regressions.
+
 ---
 
 ## 6. Session Replacement & Connection Management
@@ -243,7 +267,7 @@ Incoming relayed messages are inserted via `insertMessageIfNotExists` (`OnConfli
 | **Transport** | Direct WebSocket (Ktor CIO) | WebSocket + HTTP/3 Fallback |
 | **Message Ordering** | Strictly monotonic timestamps + UUID tie-break | Lamport / Vector Timestamps |
 | **Deduplication** | In-memory 10k LRU Cache + SQLite PK IGNORE | Distributed Key-Value Store / Persistent Store |
-| **Server Persistence** | Ephemeral Relay (Zero server-side message storage) | Durable Mailbox for Offline Users |
+| **Server Persistence** | Durable SQLite Mailbox (`mailbox_messages`) with offline delivery | Distributed durable message storage / retention policies |
 | **Security / Encryption** | Plaintext UTF-8 over TLS-capable WebSocket | End-to-End Encryption (Signal / MLS Protocol) |
 | **State Machine** | `SENDING -> SENT` with regression guards | Full `DELIVERED` & `READ` Receipts |
 | **Presence & Typing** | In-memory active session presence | Realtime typing indicators & heartbeat presence |

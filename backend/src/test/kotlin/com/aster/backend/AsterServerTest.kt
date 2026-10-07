@@ -1,5 +1,6 @@
 package com.aster.backend
 
+import com.aster.backend.database.MailboxDatabase
 import com.aster.backend.protocol.ClientMessage
 import com.aster.backend.protocol.ServerMessage
 import com.aster.backend.protocol.asterJson
@@ -12,6 +13,7 @@ import io.ktor.websocket.readText
 import kotlinx.coroutines.channels.ReceiveChannel
 import kotlinx.coroutines.channels.SendChannel
 import org.junit.jupiter.api.Test
+import java.io.File
 import kotlin.test.assertEquals
 import kotlin.test.assertIs
 import kotlin.test.assertTrue
@@ -415,6 +417,245 @@ class AsterServerTest {
                 assertEquals("rapid_$i", relay.messageId)
                 assertEquals("Message $i", relay.body)
             }
+        }
+    }
+
+    @Test
+    fun testOfflineMessageDeliveredOnReconnectAndAcked() = testApplication {
+        val mailboxDb = MailboxDatabase(":memory:")
+        val sessionManager = SessionManager()
+        application { asterModule(sessionManager, mailboxDb) }
+        val client = createClient { install(WebSockets) }
+
+        // 1. Saad connects and sends message to offline Alex
+        client.webSocket("/ws") {
+            outgoing.sendMsg(ClientMessage.Auth("user_saad"))
+            val saadAuth = incoming.receiveServerMsg()
+            assertIs<ServerMessage.AuthOk>(saadAuth)
+
+            outgoing.sendMsg(
+                ClientMessage.SendMessage(
+                    messageId = "msg_offline_100",
+                    conversationId = "conv_alex",
+                    recipientId = "user_alex",
+                    body = "Saved in mailbox for Alex",
+                    timestamp = 5000L
+                )
+            )
+            val ack = incoming.receiveServerMsg()
+            assertIs<ServerMessage.MessageAccepted>(ack)
+            assertEquals("msg_offline_100", ack.messageId)
+        }
+
+        // Verify message is stored in SQLite
+        assertTrue(mailboxDb.hasMessage("msg_offline_100"))
+
+        // 2. Alex connects later
+        client.webSocket("/ws") {
+            outgoing.sendMsg(ClientMessage.Auth("user_alex"))
+            val alexAuth = incoming.receiveServerMsg()
+            assertIs<ServerMessage.AuthOk>(alexAuth)
+
+            // Alex receives the queued message immediately after AUTH_OK
+            val relay = incoming.receiveServerMsg()
+            assertIs<ServerMessage.RelayMessage>(relay)
+            assertEquals("msg_offline_100", relay.messageId)
+            assertEquals("Saved in mailbox for Alex", relay.body)
+            assertEquals("user_saad", relay.senderId)
+
+            // 3. Alex sends ACK_RECEIVED
+            outgoing.sendMsg(ClientMessage.AckReceived("msg_offline_100"))
+        }
+
+        // 4. Alex reconnects again - message is now ACKED so it should NOT be redelivered
+        client.webSocket("/ws") {
+            outgoing.sendMsg(ClientMessage.Auth("user_alex"))
+            val alexAuth2 = incoming.receiveServerMsg()
+            assertIs<ServerMessage.AuthOk>(alexAuth2)
+
+            // Send ping to verify no unexpected messages are pending in the channel
+            outgoing.sendMsg(ClientMessage.Ping(9999L))
+            val pong = incoming.receiveServerMsg()
+            assertIs<ServerMessage.Pong>(pong)
+        }
+    }
+
+    @Test
+    fun testServerCrashAndRestartOfflineDelivery() {
+        val tempFile = File.createTempFile("aster_server_crash_test_", ".db")
+        try {
+            // Server instance 1: Saad sends message to offline Alex, then server stops
+            testApplication {
+                val db1 = MailboxDatabase(tempFile.absolutePath)
+                val sm1 = SessionManager()
+                application { asterModule(sm1, db1) }
+                val client = createClient { install(WebSockets) }
+
+                client.webSocket("/ws") {
+                    outgoing.sendMsg(ClientMessage.Auth("user_saad"))
+                    assertIs<ServerMessage.AuthOk>(incoming.receiveServerMsg())
+
+                    outgoing.sendMsg(
+                        ClientMessage.SendMessage(
+                            messageId = "msg_survive_crash",
+                            conversationId = "conv_alex",
+                            recipientId = "user_alex",
+                            body = "Survives crash and reboot",
+                            timestamp = 7777L
+                        )
+                    )
+                    val ack = incoming.receiveServerMsg()
+                    assertIs<ServerMessage.MessageAccepted>(ack)
+                }
+                db1.close()
+            }
+
+            // Server instance 2: Restart server with same SQLite file on disk
+            testApplication {
+                val db2 = MailboxDatabase(tempFile.absolutePath)
+                val sm2 = SessionManager()
+                application { asterModule(sm2, db2) }
+                val client = createClient { install(WebSockets) }
+
+                // Alex connects to newly restarted server
+                client.webSocket("/ws") {
+                    outgoing.sendMsg(ClientMessage.Auth("user_alex"))
+                    assertIs<ServerMessage.AuthOk>(incoming.receiveServerMsg())
+
+                    // Queued message is delivered from SQLite mailbox!
+                    val relay = incoming.receiveServerMsg()
+                    assertIs<ServerMessage.RelayMessage>(relay)
+                    assertEquals("msg_survive_crash", relay.messageId)
+                    assertEquals("Survives crash and reboot", relay.body)
+
+                    outgoing.sendMsg(ClientMessage.AckReceived("msg_survive_crash"))
+                }
+                db2.close()
+            }
+        } finally {
+            tempFile.delete()
+            File("${tempFile.absolutePath}-wal").delete()
+            File("${tempFile.absolutePath}-shm").delete()
+        }
+    }
+
+    @Test
+    fun testMultipleQueuedMessagesDeliveredInDeterministicOrderOnReconnect() = testApplication {
+        val mailboxDb = MailboxDatabase(":memory:")
+        val sessionManager = SessionManager()
+        application { asterModule(sessionManager, mailboxDb) }
+        val client = createClient { install(WebSockets) }
+
+        // Saad queues 3 messages while Alex is offline
+        client.webSocket("/ws") {
+            outgoing.sendMsg(ClientMessage.Auth("user_saad"))
+            assertIs<ServerMessage.AuthOk>(incoming.receiveServerMsg())
+
+            for (i in 1..3) {
+                outgoing.sendMsg(
+                    ClientMessage.SendMessage(
+                        messageId = "queue_ord_$i",
+                        conversationId = "conv_alex",
+                        recipientId = "user_alex",
+                        body = "Queued message $i",
+                        timestamp = 1000L + i
+                    )
+                )
+                val ack = incoming.receiveServerMsg()
+                assertIs<ServerMessage.MessageAccepted>(ack)
+            }
+        }
+
+        // Alex connects and receives all 3 in deterministic order
+        client.webSocket("/ws") {
+            outgoing.sendMsg(ClientMessage.Auth("user_alex"))
+            assertIs<ServerMessage.AuthOk>(incoming.receiveServerMsg())
+
+            for (i in 1..3) {
+                val relay = incoming.receiveServerMsg()
+                assertIs<ServerMessage.RelayMessage>(relay)
+                assertEquals("queue_ord_$i", relay.messageId)
+                assertEquals("Queued message $i", relay.body)
+                outgoing.sendMsg(ClientMessage.AckReceived("queue_ord_$i"))
+            }
+        }
+    }
+
+    @Test
+    fun testDuplicateSendMessageIdempotencyAcrossRestart() {
+        val tempFile = File.createTempFile("aster_dup_restart_test_", ".db")
+        try {
+            // First server session: Saad sends message
+            testApplication {
+                val db1 = MailboxDatabase(tempFile.absolutePath)
+                val sm1 = SessionManager()
+                application { asterModule(sm1, db1) }
+                val client = createClient { install(WebSockets) }
+
+                client.webSocket("/ws") {
+                    outgoing.sendMsg(ClientMessage.Auth("user_saad"))
+                    assertIs<ServerMessage.AuthOk>(incoming.receiveServerMsg())
+
+                    outgoing.sendMsg(
+                        ClientMessage.SendMessage(
+                            messageId = "msg_dup_restart",
+                            conversationId = "conv_alex",
+                            recipientId = "user_alex",
+                            body = "Idempotent body",
+                            timestamp = 1000L
+                        )
+                    )
+                    assertIs<ServerMessage.MessageAccepted>(incoming.receiveServerMsg())
+                }
+                db1.close()
+            }
+
+            // Second server session: Saad retries the same messageId after server restart
+            testApplication {
+                val db2 = MailboxDatabase(tempFile.absolutePath)
+                val sm2 = SessionManager()
+                application { asterModule(sm2, db2) }
+                val client = createClient { install(WebSockets) }
+
+                client.webSocket("/ws") {
+                    outgoing.sendMsg(ClientMessage.Auth("user_saad"))
+                    assertIs<ServerMessage.AuthOk>(incoming.receiveServerMsg())
+
+                    // Duplicate send: server should accept idempotently
+                    outgoing.sendMsg(
+                        ClientMessage.SendMessage(
+                            messageId = "msg_dup_restart",
+                            conversationId = "conv_alex",
+                            recipientId = "user_alex",
+                            body = "Idempotent body",
+                            timestamp = 1000L
+                        )
+                    )
+                    val ack = incoming.receiveServerMsg()
+                    assertIs<ServerMessage.MessageAccepted>(ack)
+                    assertEquals("msg_dup_restart", ack.messageId)
+                }
+
+                // Verify Alex connects and receives it only once
+                client.webSocket("/ws") {
+                    outgoing.sendMsg(ClientMessage.Auth("user_alex"))
+                    assertIs<ServerMessage.AuthOk>(incoming.receiveServerMsg())
+
+                    val relay = incoming.receiveServerMsg()
+                    assertIs<ServerMessage.RelayMessage>(relay)
+                    assertEquals("msg_dup_restart", relay.messageId)
+                    outgoing.sendMsg(ClientMessage.AckReceived("msg_dup_restart"))
+
+                    // Ensure no second duplicate message follows
+                    outgoing.sendMsg(ClientMessage.Ping())
+                    assertIs<ServerMessage.Pong>(incoming.receiveServerMsg())
+                }
+                db2.close()
+            }
+        } finally {
+            tempFile.delete()
+            File("${tempFile.absolutePath}-wal").delete()
+            File("${tempFile.absolutePath}-shm").delete()
         }
     }
 }

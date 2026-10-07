@@ -1,5 +1,8 @@
 package com.aster.backend.relay
 
+import com.aster.backend.database.DeliveryState
+import com.aster.backend.database.MailboxDatabase
+import com.aster.backend.database.MailboxMessage
 import com.aster.backend.protocol.ClientMessage
 import com.aster.backend.protocol.ProtocolLimits
 import com.aster.backend.protocol.ServerMessage
@@ -14,7 +17,8 @@ import kotlinx.serialization.json.contentOrNull
 import org.slf4j.LoggerFactory
 
 class MessageRelay(
-    private val sessionManager: SessionManager
+    private val sessionManager: SessionManager,
+    private val mailboxDatabase: MailboxDatabase = MailboxDatabase()
 ) {
     private val logger = LoggerFactory.getLogger(MessageRelay::class.java)
 
@@ -118,6 +122,33 @@ class MessageRelay(
         sessionManager.registerSession(userId, session)
         logger.info("User authenticated: $userId")
         sendServerMessage(session, ServerMessage.AuthOk(userId = userId))
+
+        // Deliver any offline queued messages from SQLite mailbox
+        deliverPendingMailboxMessages(userId, session)
+    }
+
+    private suspend fun deliverPendingMailboxMessages(userId: String, session: WebSocketSession) {
+        val pendingMessages = mailboxDatabase.getPendingMessagesForRecipient(userId)
+        if (pendingMessages.isNotEmpty()) {
+            logger.info("Delivering ${pendingMessages.size} queued mailbox message(s) to reconnected user '$userId'")
+            for (m in pendingMessages) {
+                val relayPayload = ServerMessage.RelayMessage(
+                    messageId = m.messageId,
+                    conversationId = m.conversationId,
+                    senderId = m.senderUserId,
+                    body = m.body,
+                    timestamp = m.clientTimestamp
+                )
+                try {
+                    sendServerMessage(session, relayPayload)
+                    mailboxDatabase.updateDeliveryState(m.messageId, DeliveryState.DELIVERED)
+                    logger.info("Queued message ${m.messageId} delivered to $userId")
+                } catch (e: Exception) {
+                    logger.error("Failed delivering queued message ${m.messageId} to $userId: ${e.message}")
+                    break
+                }
+            }
+        }
     }
 
     private suspend fun handlePing(session: WebSocketSession, ping: ClientMessage.Ping) {
@@ -175,28 +206,52 @@ class MessageRelay(
             return
         }
 
-        val isDuplicate = sessionManager.isDuplicateMessage(msg.messageId)
+        // Check deduplication (both memory LRU and durable SQLite source of truth)
+        val isDuplicate = sessionManager.isDuplicateMessage(msg.messageId) || mailboxDatabase.hasMessage(msg.messageId)
 
-        // 1. Always acknowledge sender (idempotent ACK)
-        val ackTimestamp = System.currentTimeMillis()
+        if (isDuplicate) {
+            sessionManager.recordSeenMessage(msg.messageId)
+            val ackTimestamp = System.currentTimeMillis()
+            sendServerMessage(
+                session,
+                ServerMessage.MessageAccepted(
+                    messageId = msg.messageId,
+                    timestamp = ackTimestamp
+                )
+            )
+            logger.info("Duplicate message ${msg.messageId} acknowledged idempotently; skipped relay")
+            return
+        }
+
+        // Persist new message to SQLite mailbox in QUEUED state
+        val serverReceivedTimestamp = System.currentTimeMillis()
+        val mailboxMsg = MailboxMessage(
+            messageId = msg.messageId,
+            conversationId = msg.conversationId,
+            senderUserId = senderId,
+            recipientUserId = msg.recipientId,
+            body = msg.body,
+            clientTimestamp = msg.timestamp,
+            serverReceivedTimestamp = serverReceivedTimestamp,
+            deliveryState = DeliveryState.QUEUED
+        )
+        mailboxDatabase.enqueueMessage(mailboxMsg)
+        sessionManager.recordSeenMessage(msg.messageId)
+
+        // Always acknowledge sender immediately
         sendServerMessage(
             session,
             ServerMessage.MessageAccepted(
                 messageId = msg.messageId,
-                timestamp = ackTimestamp
+                timestamp = serverReceivedTimestamp
             )
         )
-        logger.info("Message ${msg.messageId} accepted from $senderId -> ${msg.recipientId} (dup=$isDuplicate)")
+        logger.info("Message ${msg.messageId} accepted and queued from $senderId -> ${msg.recipientId}")
 
-        if (isDuplicate) {
-            logger.info("Duplicate message ${msg.messageId} suppressed; skipped relay")
-            return
-        }
-
-        // 2. Relay to recipient if connected
+        // Relay to recipient if currently online
         val recipientSessions = sessionManager.getSessions(msg.recipientId)
         if (recipientSessions.isEmpty()) {
-            logger.info("Recipient ${msg.recipientId} is offline; realtime relay skipped for message ${msg.messageId}")
+            logger.info("Recipient ${msg.recipientId} is offline; message ${msg.messageId} remains stored in mailbox")
         } else {
             val relayPayload = ServerMessage.RelayMessage(
                 messageId = msg.messageId,
@@ -205,13 +260,18 @@ class MessageRelay(
                 body = msg.body,
                 timestamp = msg.timestamp
             )
+            var delivered = false
             for (recipientSession in recipientSessions) {
                 try {
                     sendServerMessage(recipientSession, relayPayload)
-                    logger.info("Message ${msg.messageId} relayed to recipient ${msg.recipientId}")
+                    delivered = true
+                    logger.info("Message ${msg.messageId} relayed to online recipient ${msg.recipientId}")
                 } catch (e: Exception) {
                     logger.error("Failed to relay message ${msg.messageId} to recipient session: ${e.message}")
                 }
+            }
+            if (delivered) {
+                mailboxDatabase.updateDeliveryState(msg.messageId, DeliveryState.DELIVERED)
             }
         }
     }
@@ -222,7 +282,8 @@ class MessageRelay(
             logger.warn("Invalid ACK_RECEIVED messageId: '${ack.messageId}'")
             return
         }
-        logger.info("Client $receiverId acknowledged receipt of message ${ack.messageId}")
+        mailboxDatabase.updateDeliveryState(ack.messageId, DeliveryState.ACKED)
+        logger.info("Client $receiverId acknowledged receipt of message ${ack.messageId} (state -> ACKED)")
     }
 
     suspend fun sendServerMessage(session: WebSocketSession, serverMsg: ServerMessage) {

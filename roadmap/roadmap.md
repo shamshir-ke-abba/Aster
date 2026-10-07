@@ -38,13 +38,14 @@ The product should prioritize usability first and introduce stronger E2EE/securi
 - [x] Conversation list
 - [x] Unread indicators
 - [x] Message history (Room database)
-- [x] Offline message queue (remote)
+- [x] Offline message queue (client queue + remote durable SQLite mailbox)
+- [x] Server-side SQLite mailbox (WAL mode, crash-recovery, deterministic replay)
 
 ## Realtime
 - [x] WebSocket connection
 - [x] Connection state
 - [x] Automatic reconnect
-- [x] Server message acknowledgement
+- [x] Server message acknowledgement (MESSAGE_ACCEPTED & ACK_RECEIVED)
 
 # Phase 2 — Groups
 

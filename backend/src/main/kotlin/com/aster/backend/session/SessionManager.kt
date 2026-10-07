@@ -89,6 +89,11 @@ class SessionManager {
         return !seenMessageIds.add(messageId)
     }
 
+    @Synchronized
+    fun recordSeenMessage(messageId: String) {
+        seenMessageIds.add(messageId)
+    }
+
     fun clear() {
         userSession.clear()
         sessionToUser.clear()

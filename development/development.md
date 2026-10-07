@@ -136,3 +136,21 @@ For LAN integration testing and standalone hardware verification, the Aster Ktor
   - `aster-backend logs [N]`- View the last N lines of stdout/stderr logs (auto-rotated at 1MB).
 - **Listening Endpoint**: `0.0.0.0:8080` (`ws://<tablet-lan-ip>:8080/ws`).
 
+### Server-Side SQLite Mailbox Configuration
+- **Database Driver**: `org.xerial:sqlite-jdbc:3.41.2.2` (includes native ARMv7 Linux `libsqlitejdbc.so`).
+- **Configuration Variable**: `ASTER_DB_PATH` controls the location of the SQLite database.
+  - Default (Local JVM): `aster.db` (in current working directory) or `:memory:` for automated integration tests.
+  - Tablet Deployment: `/data/local/tmp/aster-data/aster.db` (bind-mounted into `/aster-data/aster.db` inside the chroot).
+- **Journal Mode**: WAL mode (`PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA busy_timeout=5000;`).
+- **Lifecycle & Storage**:
+  - Offline messages persist across backend service restarts and device reboots.
+  - Delivery states: `QUEUED` -> `DELIVERED` -> `ACKED`.
+  - Reconnect replay queries all messages in `('QUEUED', 'DELIVERED')` sorted deterministically by `(server_received_timestamp ASC, message_id ASC)`.
+  - Upon recipient processing, client emits `ACK_RECEIVED` and server updates record to `ACKED`.
+- **Backend Testing**:
+  - Run all backend unit & integration tests:
+    ```bash
+    cd backend && ./gradlew test
+    ```
+
+
