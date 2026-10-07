@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Fallback launcher icon for API 24-25 (pre-adaptive-icon).
+     Uses a simple layer-list: Aster Night background + centered Aster Violet circle.
+     Devices on API 26+ will use mipmap-anydpi-v26/ic_launcher.xml instead. -->
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+    <item>
+        <shape android:shape="rectangle">
+            <solid android:color="#080A12" />
+        </shape>
+    </item>
+    <item
+        android:gravity="center"
+        android:width="48dp"
+        android:height="48dp">
+        <shape android:shape="oval">
+            <solid android:color="#8B8DFF" />
+        </shape>
+    </item>
+</layer-list>

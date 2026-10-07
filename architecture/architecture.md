@@ -4,129 +4,87 @@
 
 Aster is a private messaging application intended for approximately 100 users.
 
-The architecture should be simple, cheap to operate, replaceable, testable and compatible with future E2EE.
+The architecture is simple, zero-cost to operate, modular, testable, and strictly compatible with future E2EE.
 
 Initial infrastructure target: **₹0/month**
 
-## 2. High-Level Architecture
+---
+
+## 2. High-Level Realtime Architecture
 
 ```
-Android Client
-    │
-    │ WebSocket
-    ▼
-Relay Backend
-    │
-    ▼
-Database
+Android Client (User A)         Aster Backend Relay (Ktor CIO)        Android Client (User B)
+       │                                     │                                    │
+       │────── WebSocket (ws://host:8080/ws) ┼ ────── WebSocket (ws://host:8080/ws) │
+       │                                     │                                    │
+       ▼                                     ▼                                    ▼
+Room SQLite Database                   In-Memory Sessions                   Room SQLite Database
+ (Local-first state)                    (Ephemeral Relay)                    (Local-first state)
 ```
 
-The backend handles authentication, connections, routing and temporary offline delivery.
+The backend handles:
+- Developer/Client authentication handshakes (`AUTH` / `AUTH_OK`)
+- WebSocket connection lifecycle & heartbeat ping/pongs
+- Message identity verification and deduplication
+- Instant sender acknowledgements (`MESSAGE_ACCEPTED`)
+- Ephemeral realtime message relaying (`MESSAGE`) to recipient active sessions
 
-## 3. Client
+Persistent message state is **local-first**; Android Room remains the authoritative store.
 
-Initial target: Android.
+---
 
-Preferred stack:
-- Kotlin
-- Jetpack Compose
-- Coroutines
-- Room
-- Android Keystore
-- WebSockets
-- Android notification APIs
+## 3. Client Architecture
 
-## 4. Backend
+**Platform**: Android (Kotlin, Jetpack Compose, Room, Hilt, Coroutines, Flow).
 
-Responsibilities:
-- Authentication
-- User discovery
-- WebSocket connections
-- Message routing
-- Offline message queue
-- Delivery acknowledgement
-- Basic rate limiting
-- Group membership
-- Minimal metadata
-
-The backend should remain intentionally small.
-
-## 5. Database
-
-Potential entities:
-- users
-- devices
-- conversations
-- conversation_members
-- messages
-- delivery_state
-- sessions
-
-When E2EE is enabled, message content stored server-side should be ciphertext.
-
-## 6. Client Database
-
-The client should maintain local state for conversations, messages, users, groups, delivery state, read state and local settings.
-
-Room is the preferred implementation.
-
-## 7. Message Flow
-
-Initial:
+### Layered Separation
 ```
-Client A → Backend → Client B → Local Database → UI
+Compose UI (HomeScreen / ChatScreen)
+    ↓
+ViewModel (HomeViewModel / ChatViewModel)
+    ↓
+Domain Repository (MessageRepository, UserRepository, ConversationRepository)
+    ↓                                              ↓
+Local Data Source (Room Database & DAOs)    Network Layer (AsterWebSocketClient, OkHttp)
 ```
 
-Future E2EE:
-```
-Client A → Encrypt → Ciphertext → Backend → Ciphertext → Client B → Decrypt
-```
+### Local-First Network Principles
+1. **Never block UI or Room writes on network availability**: When sending a message, it is immediately written to Room with status `SENDING` (`·`), and UI observers update instantaneously.
+2. **WebSocket sits strictly behind `MessageRepository`**: ViewModels and Compose screens never directly talk to WebSockets or HTTP endpoints.
+3. **Message Identity**: Every message ID is generated on the client device before transmission and preserved by the backend and receiving clients.
+4. **Reconciliation & ACK**:
+   - Sender receives `MESSAGE_ACCEPTED` -> `MessageRepository` updates Room message status to `SENT` (`✦`).
+   - Receiver receives `MESSAGE` -> `MessageRepository` persists it into Room and updates conversation unread count and preview.
+5. **Offline Queue & Reconnection**: If the network is disconnected, messages remain in `SENDING` state. Upon WebSocket reconnection and authentication, `MessageRepository` queries pending messages (`status == SENDING`) and replays them over the wire.
 
-## 8. Realtime
+---
 
-Primary realtime mechanism: WebSocket.
+## 4. Backend Relay Architecture
 
-Requirements:
-- Connection establishment
-- Authentication
-- Heartbeat
-- Reconnection
-- Message acknowledgement
-- Duplicate protection
-- Ordered handling where required
+**Technology**: Kotlin 2.0.21, Ktor 2.3.12 (CIO Engine), Kotlinx Serialization.
 
-## 9. Offline Behaviour
+- **Lightweight Footprint**: Memory footprint < 60 MB JVM, single-jar or containerized deployment.
+- **Session Management (`SessionManager`)**: In-memory concurrent maps indexing `userId -> Set<WebSocketSession>` and `WebSocketSession -> userId`.
+- **Deduplication**: Bounded LRU memory cache tracking the last 10,000 processed message IDs. Re-sent messages receive immediate `MESSAGE_ACCEPTED` ACKs without duplicate relay.
+- **Endpoints**:
+  - `GET /health`: JSON status reporting active user and connection counts.
+  - `GET /ws`: Duplex WebSocket endpoint for Aster protocol.
+- **Hardware / Edge Deployment**: Validated persistent deployment on ARMv7 devices (Samsung SM-T285, Android 7.1.2) utilizing an isolated userspace chroot (OpenJDK 17), Magisk `service.d` boot hooks, and an automatic process supervisor (`aster-backend`).
 
-Messages must not disappear because a device is temporarily offline.
+---
 
-The backend may temporarily retain undelivered messages and remove them after confirmed delivery according to retention policy.
+## 5. Security & Future E2EE Compatibility
 
-## 10. Backend Abstraction
+1. **Envelope Structure**: The JSON protocol defines `body` as a generic container string. When E2EE is activated, this string becomes a base64-encoded ciphertext envelope with cryptographic headers without requiring changes to routing (`messageId`, `conversationId`, `recipientId`).
+2. **Server Trust Boundary**: The server does not store user private keys or require message plaintext inspection.
 
-Conceptual client layers:
+---
 
-UI → ViewModel → Repository → Messaging Service → Network / Local DB
+## 6. Definition of Layers & Interfaces
 
-This allows backend infrastructure to be replaced later.
-
-## 11. Scaling Target
-
-Initial intended maximum: approximately 100 users.
-
-Do not prematurely introduce Kubernetes, microservices, service meshes, multi-region deployments or large cloud infrastructure.
-
-## 12. Cost Principle
-
-Prefer free infrastructure during development and private testing.
-
-Do not introduce paid infrastructure unless the free infrastructure becomes insufficient or reliability requires it.
-
-## 13. Security Evolution
-
-The architecture must allow E2EE to be introduced later.
-
-The server should never require user private keys.
-
-## 14. Architecture Rule
-
-Prefer the simplest architecture that reliably solves the current problem. Complexity must have a measurable benefit.
+| Component | Responsibility |
+| :--- | :--- |
+| `AsterWebSocketClient` | Manages raw OkHttp WebSocket connection, auto-reconnect with exponential backoff, and state flows. |
+| `MessageRepositoryImpl` | Coordinates between `MessageDao`, `ConversationDao`, and `AsterWebSocketClient`. |
+| `SessionManager` | Manages active server-side sessions, connection tracking, and deduplication. |
+| `MessageRelay` | Validates wire messages, returns ACKs, and forwards messages to target recipient sessions. |

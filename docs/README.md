@@ -39,11 +39,13 @@ Aster is the space connecting them.
 
 ## Current Status
 
-Project documentation initialized.
+- Android foundation established and verified (Kotlin 2.0.21, AGP 8.7.3, Compose BOM 2024.10.01, Hilt, Room 2.6.1).
+- Local-first messaging vertical slice implemented: Room database persistence, Conversation list, Chat screen, message creation and local delivery state transitions.
+- Realtime WebSocket relay backend implemented (Ktor CIO, ₹0 cost) and verified end-to-end with two-client messaging, server ACKs, offline queueing, and automatic reconnection.
 
 Next major milestone:
 
-**Build the Android messaging MVP.**
+**Phase 2 — Group messaging & multi-user constellations.**
 
 ## Design
 

@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Aster star glyph for the adaptive launcher icon foreground.
+     A four-pointed star (diamond cross) in Aster Violet, centered in a 108dp canvas.
+     Geometrically simple — works at all icon sizes. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- Four-pointed star: two diamond paths crossing at center (54,54).
+         Each arm is 26dp long, 6dp wide at center, tapering to a point. -->
+    <path
+        android:fillColor="#8B8DFF"
+        android:pathData="
+            M54,18
+            L58,50 L90,54 L58,58 L54,90
+            L50,58 L18,54 L50,50 Z" />
+
+    <!-- Glow highlight: smaller inner star in Aster Glow -->
+    <path
+        android:fillColor="#B8B9FF"
+        android:pathData="
+            M54,36
+            L56,50 L70,54 L56,58 L54,72
+            L52,58 L38,54 L52,50 Z" />
+</vector>

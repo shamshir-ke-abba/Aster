@@ -119,3 +119,20 @@ Simple first.
 Reliable second.
 Polished third.
 Scale when needed.
+
+## 17. Tablet-Hosted Development Backend (Samsung SM-T285)
+
+For LAN integration testing and standalone hardware verification, the Aster Ktor backend relay can run self-hosted and persistent on a rooted Android device (e.g. Samsung SM-T285, ARMv7).
+
+### Architecture & Service Management
+- **Runtime**: OpenJDK 17 ARMv7 within a minimal userspace chroot at `/data/local/tmp/aster-root`.
+- **Boot Hook**: Magisk `service.d` late-start script at `/data/adb/service.d/aster-backend.sh` auto-starts the service on device boot once the network interface (`wlan0`) is ready.
+- **Supervisor**: A resilient supervisor process tracks the backend lifecycle and automatically relaunches the process on failure (3-second backoff) while preventing duplicate instances.
+- **Convenience CLI**: Accessible via `aster-backend` (symlinked into `/sbin/aster-backend` and `/data/local/tmp/aster-backend`):
+  - `aster-backend status`  - View backend PID, supervisor PID, memory usage, port status, and log file size.
+  - `aster-backend start`   - Safely start supervisor and backend detached; ignores duplicate invocations.
+  - `aster-backend stop`    - Gracefully stops supervisor and backend (SIGTERM then SIGKILL fallback); clears PID files.
+  - `aster-backend restart` - Cleanly stops and restarts the service.
+  - `aster-backend logs [N]`- View the last N lines of stdout/stderr logs (auto-rotated at 1MB).
+- **Listening Endpoint**: `0.0.0.0:8080` (`ws://<tablet-lan-ip>:8080/ws`).
+

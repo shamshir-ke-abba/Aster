@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Theme.Aster: edge-to-edge with Aster Night window background.
+         We use a DayNight parent so the system does not force a light theme.
+         windowBackground matches Aster Night (#080A12) so the launch frame
+         is dark even before Compose draws its first frame. -->
+    <style name="Theme.Aster" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowBackground">#080A12</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <item name="android:windowDrawsSystemBarBackgrounds">true</item>
+        <item name="android:enforceStatusBarContrast">false</item>
+        <item name="android:enforceNavigationBarContrast">false</item>
+    </style>
+</resources>

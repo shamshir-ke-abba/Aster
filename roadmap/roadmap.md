@@ -10,15 +10,15 @@ The product should prioritize usability first and introduce stronger E2EE/securi
 
 # Phase 0 — Foundation
 
-- [ ] Create Android project
-- [ ] Establish package/application identity
-- [ ] Establish Aster design system
-- [ ] Establish project documentation
-- [ ] Establish Git repository
-- [ ] Establish development/build workflow
-- [ ] Create initial app shell
-- [ ] Implement theme system
-- [ ] Implement navigation foundation
+- [x] Create Android project
+- [x] Establish package/application identity
+- [x] Establish Aster design system
+- [x] Establish project documentation
+- [x] Establish Git repository
+- [x] Establish development/build workflow
+- [x] Create initial app shell
+- [x] Implement theme system
+- [x] Implement navigation foundation
 
 # Phase 1 — Core Messaging MVP
 
@@ -31,20 +31,20 @@ The product should prioritize usability first and introduce stronger E2EE/securi
 - [ ] Basic profile
 
 ## Messaging
-- [ ] One-to-one conversations
-- [ ] Send text messages
-- [ ] Receive text messages
-- [ ] Message timestamps
-- [ ] Conversation list
-- [ ] Unread indicators
-- [ ] Message history
-- [ ] Offline message queue
+- [x] One-to-one conversations (local persistence)
+- [x] Send text messages (local persistence)
+- [x] Receive text messages (remote)
+- [x] Message timestamps
+- [x] Conversation list
+- [x] Unread indicators
+- [x] Message history (Room database)
+- [x] Offline message queue (remote)
 
 ## Realtime
-- [ ] WebSocket connection
-- [ ] Connection state
-- [ ] Automatic reconnect
-- [ ] Server message acknowledgement
+- [x] WebSocket connection
+- [x] Connection state
+- [x] Automatic reconnect
+- [x] Server message acknowledgement
 
 # Phase 2 — Groups
 
