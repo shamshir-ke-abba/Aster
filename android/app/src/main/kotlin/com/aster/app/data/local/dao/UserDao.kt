@@ -36,4 +36,10 @@ interface UserDao {
 
     @Query("SELECT COUNT(*) FROM users")
     suspend fun getUserCount(): Int
+
+    @Query("UPDATE users SET is_local_user = 0")
+    suspend fun clearLocalUser()
+
+    @Query("UPDATE users SET is_local_user = CASE WHEN id = :authenticatedUserId THEN 1 ELSE 0 END")
+    suspend fun setLocalUser(authenticatedUserId: String)
 }

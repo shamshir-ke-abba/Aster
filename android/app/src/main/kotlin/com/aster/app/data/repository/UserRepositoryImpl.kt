@@ -35,4 +35,26 @@ class UserRepositoryImpl @Inject constructor(
     override suspend fun saveUser(user: User) {
         userDao.insertUser(UserEntity.fromDomain(user))
     }
+
+    override suspend fun setAuthenticatedUser(userId: String) {
+        val existing = userDao.getUserByIdOnce(userId)
+        if (existing == null) {
+            val displayName = userId.removePrefix("user_").replaceFirstChar { it.uppercase() }
+            val username = userId.removePrefix("user_")
+            userDao.insertUser(
+                UserEntity(
+                    id = userId,
+                    username = username,
+                    displayName = displayName,
+                    isLocalUser = true,
+                    isOnline = true
+                )
+            )
+        }
+        userDao.setLocalUser(userId)
+    }
+
+    override suspend fun clearAuthenticatedUser() {
+        userDao.clearLocalUser()
+    }
 }

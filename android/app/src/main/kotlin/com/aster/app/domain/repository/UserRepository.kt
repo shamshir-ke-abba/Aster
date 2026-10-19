@@ -12,4 +12,6 @@ interface UserRepository {
     fun getUser(userId: String): Flow<User?>
     fun getUsers(): Flow<List<User>>
     suspend fun saveUser(user: User)
+    suspend fun setAuthenticatedUser(userId: String)
+    suspend fun clearAuthenticatedUser()
 }

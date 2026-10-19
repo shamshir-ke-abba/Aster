@@ -16,6 +16,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.resetMain
@@ -54,14 +55,18 @@ class ViewModelTest {
             .allowMainThreadQueries()
             .build()
 
-        webSocketClient = com.aster.app.data.network.AsterWebSocketClient(okhttp3.OkHttpClient())
+        val authStorage = com.aster.app.data.auth.AsterAuthStorage(context)
+        authStorage.saveAuthToken("ast_tok_test_saad")
+        authStorage.saveAuthenticatedUserId("user_saad")
+        webSocketClient = com.aster.app.data.network.AsterWebSocketClient(okhttp3.OkHttpClient(), authStorage)
 
         userRepository = UserRepositoryImpl(database.userDao())
         conversationRepository = ConversationRepositoryImpl(
             conversationDao = database.conversationDao(),
             conversationMemberDao = database.conversationMemberDao(),
             messageDao = database.messageDao(),
-            userDao = database.userDao()
+            userDao = database.userDao(),
+            webSocketClient = webSocketClient
         )
         messageRepository = MessageRepositoryImpl(
             messageDao = database.messageDao(),
@@ -74,7 +79,8 @@ class ViewModelTest {
             userDao = database.userDao(),
             conversationDao = database.conversationDao(),
             conversationMemberDao = database.conversationMemberDao(),
-            messageDao = database.messageDao()
+            messageDao = database.messageDao(),
+            authStorage = authStorage
         )
     }
 
@@ -139,5 +145,146 @@ class ViewModelTest {
         assertEquals("See you there!", lastMsg.body)
         assertEquals(MessageStatus.SENDING, lastMsg.status)
         assertEquals("user_saad", lastMsg.senderId)
+    }
+
+    @Test
+    fun homeViewModel_availableUsersFiltersLocalUser() = runTest(testDispatcher) {
+        val viewModel = HomeViewModel(
+            conversationRepository = conversationRepository,
+            userRepository = userRepository,
+            seedInitializer = seedInitializer,
+            webSocketClient = webSocketClient
+        )
+
+        advanceUntilIdle()
+
+        val state = viewModel.uiState.filter { !it.isLoading && it.localUser != null && it.availableUsers.isNotEmpty() }.first()
+        assertEquals(3, state.availableUsers.size)
+        // Verify none of the available users is the local user
+        assertTrue(state.availableUsers.none { it.id == "user_saad" })
+        assertTrue(state.availableUsers.none { it.isLocalUser })
+        assertTrue(state.availableUsers.any { it.id == "user_sam" })
+        assertTrue(state.availableUsers.any { it.id == "user_alex" })
+        assertTrue(state.availableUsers.any { it.id == "user_rohan" })
+    }
+
+    @Test
+    fun homeViewModel_openAndCloseNewChat() = runTest(testDispatcher) {
+        seedInitializer.initializeIfNeeded()
+        val viewModel = HomeViewModel(
+            conversationRepository = conversationRepository,
+            userRepository = userRepository,
+            seedInitializer = seedInitializer,
+            webSocketClient = webSocketClient
+        )
+
+        val initialState = viewModel.uiState.filter { !it.isLoading }.first()
+        assertFalse(initialState.isNewChatOpen)
+
+        viewModel.openNewChat()
+        val openedState = viewModel.uiState.filter { it.isNewChatOpen }.first()
+        assertTrue(openedState.isNewChatOpen)
+
+        viewModel.closeNewChat()
+        val closedState = viewModel.uiState.filter { !it.isNewChatOpen }.first()
+        assertFalse(closedState.isNewChatOpen)
+    }
+
+    @Test
+    fun homeViewModel_startConversationCreatesAndNavigates() = runTest(testDispatcher) {
+        seedInitializer.initializeIfNeeded()
+        val viewModel = HomeViewModel(
+            conversationRepository = conversationRepository,
+            userRepository = userRepository,
+            seedInitializer = seedInitializer,
+            webSocketClient = webSocketClient
+        )
+
+        viewModel.uiState.filter { !it.isLoading }.first()
+
+        viewModel.openNewChat()
+        val openedState = viewModel.uiState.filter { it.isNewChatOpen }.first()
+        assertTrue(openedState.isNewChatOpen)
+
+        var navigatedConvId: String? = null
+        viewModel.startConversation("user_sam") { convId ->
+            navigatedConvId = convId
+        }
+
+        val updatedState = viewModel.uiState.filter { it.conversations.size == 3 && !it.isNewChatOpen }.first()
+        assertNotNull(navigatedConvId)
+        assertEquals("conv_user_saad_user_sam", navigatedConvId)
+        assertFalse(updatedState.isNewChatOpen)
+        assertTrue(updatedState.conversations.any { it.id == "conv_user_saad_user_sam" && it.title == "Sam" })
+
+        // Calling startConversation again should return the exact same conversation ID (idempotent)
+        var secondNavigatedId: String? = null
+        viewModel.startConversation("user_sam") { convId ->
+            secondNavigatedId = convId
+        }
+        for (i in 1..20) {
+            advanceUntilIdle()
+            if (secondNavigatedId != null) break
+            Thread.sleep(50)
+        }
+        assertEquals("conv_user_saad_user_sam", secondNavigatedId)
+        assertEquals(3, viewModel.uiState.value.conversations.size)
+    }
+
+    @Test
+    fun homeViewModel_startConversationHandlesError() = runTest(testDispatcher) {
+        seedInitializer.initializeIfNeeded()
+        val viewModel = HomeViewModel(
+            conversationRepository = conversationRepository,
+            userRepository = userRepository,
+            seedInitializer = seedInitializer,
+            webSocketClient = webSocketClient
+        )
+
+        viewModel.uiState.filter { !it.isLoading }.first()
+
+        var navigated = false
+        viewModel.startConversation("user_unknown_404") {
+            navigated = true
+        }
+
+        val errorState = viewModel.uiState.filter { it.errorMessage != null }.first()
+        assertFalse(navigated)
+        assertNotNull(errorState.errorMessage)
+    }
+
+    @Test
+    fun homeViewModel_createGroup_createsAndNavigates() = runTest(testDispatcher) {
+        seedInitializer.initializeIfNeeded()
+        val viewModel = HomeViewModel(
+            conversationRepository = conversationRepository,
+            userRepository = userRepository,
+            seedInitializer = seedInitializer,
+            webSocketClient = webSocketClient
+        )
+
+        viewModel.uiState.filter { !it.isLoading }.first()
+
+        var navigatedConvId: String? = null
+        viewModel.createGroup("Starlight Circle", listOf("user_alex", "user_sam")) { convId ->
+            navigatedConvId = convId
+        }
+
+        for (i in 1..20) {
+            advanceUntilIdle()
+            if (navigatedConvId != null) break
+            Thread.sleep(50)
+        }
+
+        assertNotNull(navigatedConvId)
+        assertTrue(navigatedConvId!!.startsWith("group_"))
+
+        val stateWithGroup = viewModel.uiState.filter { state ->
+            state.conversations.any { it.id == navigatedConvId && it.isGroup }
+        }.first()
+
+        val groupConv = stateWithGroup.conversations.first { it.id == navigatedConvId }
+        assertTrue(groupConv.isGroup)
+        assertEquals("Starlight Circle", groupConv.title)
     }
 }

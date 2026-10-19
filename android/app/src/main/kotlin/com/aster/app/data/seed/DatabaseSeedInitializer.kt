@@ -25,49 +25,58 @@ class DatabaseSeedInitializer @Inject constructor(
     private val userDao: UserDao,
     private val conversationDao: ConversationDao,
     private val conversationMemberDao: ConversationMemberDao,
-    private val messageDao: MessageDao
+    private val messageDao: MessageDao,
+    private val authStorage: com.aster.app.data.auth.AsterAuthStorage
 ) {
 
     suspend fun initializeIfNeeded() = withContext(Dispatchers.IO) {
-        if (userDao.getUserCount() > 0) {
+        val currentAuthUserId = authStorage.getAuthenticatedUserId()
+
+        if (userDao.getUserByIdOnce("user_rohan") != null) {
+            // Already initialized; sync local user with authenticated state safely
+            if (!currentAuthUserId.isNullOrBlank()) {
+                userDao.setLocalUser(currentAuthUserId)
+            } else {
+                userDao.clearLocalUser()
+            }
             return@withContext
         }
 
         val now = System.currentTimeMillis()
 
-        // 1. Users: Current local user ("Saad") and sample contacts
-        val localUser = UserEntity(
+        // 1. Users: Sample contacts (derived from authenticated state)
+        val userSaad = UserEntity(
             id = "user_saad",
             username = "saad",
             displayName = "Saad",
-            isLocalUser = true,
+            isLocalUser = ("user_saad" == currentAuthUserId),
             isOnline = true
         )
         val alex = UserEntity(
             id = "user_alex",
             username = "alex",
             displayName = "Alex",
-            isLocalUser = false,
+            isLocalUser = ("user_alex" == currentAuthUserId),
             isOnline = true
         )
         val rohan = UserEntity(
             id = "user_rohan",
             username = "rohan",
             displayName = "Rohan",
-            isLocalUser = false,
+            isLocalUser = ("user_rohan" == currentAuthUserId),
             isOnline = false
         )
         val sam = UserEntity(
             id = "user_sam",
             username = "sam",
             displayName = "Sam",
-            isLocalUser = false,
+            isLocalUser = ("user_sam" == currentAuthUserId),
             isOnline = true
         )
 
-        userDao.insertUsers(listOf(localUser, alex, rohan, sam))
+        userDao.insertUsers(listOf(userSaad, alex, rohan, sam))
 
-        // 2. Conversation 1: 1:1 with Alex
+        // 2. Conversation 1: 1:1 between Saad and Alex
         val convAlex = ConversationEntity(
             id = "conv_alex",
             title = "Alex",
@@ -76,7 +85,7 @@ class DatabaseSeedInitializer @Inject constructor(
             updatedAt = now - 900000
         )
         val membersAlex = listOf(
-            ConversationMemberEntity(convAlex.id, localUser.id, "MEMBER", now - 86400000),
+            ConversationMemberEntity(convAlex.id, userSaad.id, "MEMBER", now - 86400000),
             ConversationMemberEntity(convAlex.id, alex.id, "MEMBER", now - 86400000)
         )
         val messagesAlex = listOf(
@@ -91,7 +100,7 @@ class DatabaseSeedInitializer @Inject constructor(
             MessageEntity(
                 id = "msg_alex_2",
                 conversationId = convAlex.id,
-                senderId = localUser.id,
+                senderId = userSaad.id,
                 body = "Yeah I'm coming 😂",
                 createdAt = now - 1800000,
                 status = MessageStatus.SENT
@@ -106,7 +115,7 @@ class DatabaseSeedInitializer @Inject constructor(
             )
         )
 
-        // 3. Conversation 2: 1:1 with Rohan
+        // 3. Conversation 2: 1:1 between Saad and Rohan
         val convRohan = ConversationEntity(
             id = "conv_rohan",
             title = "Rohan",
@@ -115,7 +124,7 @@ class DatabaseSeedInitializer @Inject constructor(
             updatedAt = now - 7200000
         )
         val membersRohan = listOf(
-            ConversationMemberEntity(convRohan.id, localUser.id, "MEMBER", now - 172800000),
+            ConversationMemberEntity(convRohan.id, userSaad.id, "MEMBER", now - 172800000),
             ConversationMemberEntity(convRohan.id, rohan.id, "MEMBER", now - 172800000)
         )
         val messagesRohan = listOf(
@@ -132,5 +141,12 @@ class DatabaseSeedInitializer @Inject constructor(
         conversationDao.insertConversations(listOf(convAlex, convRohan))
         conversationMemberDao.insertMembers(membersAlex + membersRohan)
         messageDao.insertMessages(messagesAlex + messagesRohan)
+
+        // Ensure active local user reflects authenticated session
+        if (!currentAuthUserId.isNullOrBlank()) {
+            userDao.setLocalUser(currentAuthUserId)
+        } else {
+            userDao.clearLocalUser()
+        }
     }
 }

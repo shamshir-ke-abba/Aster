@@ -17,6 +17,7 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.test.runTest
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
@@ -43,14 +44,18 @@ class RepositoryTest {
             .allowMainThreadQueries()
             .build()
 
-        webSocketClient = com.aster.app.data.network.AsterWebSocketClient(okhttp3.OkHttpClient())
+        val authStorage = com.aster.app.data.auth.AsterAuthStorage(context)
+        authStorage.saveAuthToken("ast_tok_test_saad")
+        authStorage.saveAuthenticatedUserId("user_saad")
+        webSocketClient = com.aster.app.data.network.AsterWebSocketClient(okhttp3.OkHttpClient(), authStorage)
 
         userRepository = UserRepositoryImpl(database.userDao())
         conversationRepository = ConversationRepositoryImpl(
             conversationDao = database.conversationDao(),
             conversationMemberDao = database.conversationMemberDao(),
             messageDao = database.messageDao(),
-            userDao = database.userDao()
+            userDao = database.userDao(),
+            webSocketClient = webSocketClient
         )
         messageRepository = MessageRepositoryImpl(
             messageDao = database.messageDao(),
@@ -274,5 +279,122 @@ class RepositoryTest {
         assertNotNull(retrieved)
         assertEquals("Original body", retrieved!!.body)
         assertEquals(MessageStatus.READ, retrieved.status)
+    }
+
+    @Test
+    fun conversationRepository_getOrCreateDirectConversation_createsNewConversationAndMembers() = runTest {
+        val localUser = UserEntity("user_saad", "saad", "Saad", isLocalUser = true, isOnline = true)
+        val sam = UserEntity("user_sam", "sam", "Sam", isLocalUser = false, isOnline = true)
+        database.userDao().insertUsers(listOf(localUser, sam))
+
+        val conversation = conversationRepository.getOrCreateDirectConversation("user_sam")
+        assertNotNull(conversation)
+        assertEquals("Sam", conversation.title)
+        assertFalse(conversation.isGroup)
+        assertEquals("user_sam", conversation.otherMember?.id)
+
+        // Verify database state: conversation entity exists
+        val dbConv = database.conversationDao().getConversationByIdOnce(conversation.id)
+        assertNotNull(dbConv)
+        assertEquals("Sam", dbConv!!.title)
+
+        // Verify database state: 2 membership records exist with foreign key integrity
+        val members = database.conversationMemberDao().getMembersForConversationOnce(conversation.id)
+        assertEquals(2, members.size)
+        assertTrue(members.any { it.id == "user_saad" })
+        assertTrue(members.any { it.id == "user_sam" })
+    }
+
+    @Test
+    fun conversationRepository_getOrCreateDirectConversation_idempotentAndReturnsExisting() = runTest {
+        val localUser = UserEntity("user_saad", "saad", "Saad", isLocalUser = true, isOnline = true)
+        val sam = UserEntity("user_sam", "sam", "Sam", isLocalUser = false, isOnline = true)
+        database.userDao().insertUsers(listOf(localUser, sam))
+
+        val conv1 = conversationRepository.getOrCreateDirectConversation("user_sam")
+        val conv2 = conversationRepository.getOrCreateDirectConversation("user_sam")
+
+        assertEquals(conv1.id, conv2.id)
+        assertEquals(conv1.title, conv2.title)
+
+        // Database should only have 1 conversation
+        val count = database.conversationDao().getConversationCount()
+        assertEquals(1, count)
+    }
+
+    @Test
+    fun conversationRepository_getOrCreateDirectConversation_findsExistingPreseededConversation() = runTest {
+        val localUser = UserEntity("user_saad", "saad", "Saad", isLocalUser = true, isOnline = true)
+        val alex = UserEntity("user_alex", "alex", "Alex", isLocalUser = false, isOnline = true)
+        database.userDao().insertUsers(listOf(localUser, alex))
+
+        // Preseed conversation conv_alex
+        val now = System.currentTimeMillis()
+        val convAlex = Conversation("conv_alex", "Alex", isGroup = false, createdAt = now)
+        conversationRepository.createConversation(convAlex, listOf("user_saad", "user_alex"))
+
+        // Call getOrCreateDirectConversation for Alex
+        val conversation = conversationRepository.getOrCreateDirectConversation("user_alex")
+        assertEquals("conv_alex", conversation.id)
+        assertEquals("Alex", conversation.title)
+
+        // Must not duplicate
+        val count = database.conversationDao().getConversationCount()
+        assertEquals(1, count)
+    }
+
+    @Test
+    fun conversationRepository_getOrCreateDirectConversation_rejectsSelfOrUnknownUser() = runTest {
+        val localUser = UserEntity("user_saad", "saad", "Saad", isLocalUser = true, isOnline = true)
+        database.userDao().insertUser(localUser)
+
+        var selfExceptionThrown = false
+        try {
+            conversationRepository.getOrCreateDirectConversation("user_saad")
+        } catch (e: IllegalArgumentException) {
+            selfExceptionThrown = true
+        }
+        assertTrue("Expected rejection when creating conversation with self", selfExceptionThrown)
+
+        var unknownExceptionThrown = false
+        try {
+            conversationRepository.getOrCreateDirectConversation("user_unknown_999")
+        } catch (e: IllegalArgumentException) {
+            unknownExceptionThrown = true
+        }
+        assertTrue("Expected rejection when creating conversation with unknown user", unknownExceptionThrown)
+    }
+
+    @Test
+    fun conversationRepository_createGroup_persistsGroupAndMembers() = runTest {
+        val localUser = UserEntity("user_saad", "saad", "Saad", isLocalUser = true, isOnline = true)
+        val userAlex = UserEntity("user_alex", "alex", "Alex", isLocalUser = false, isOnline = true)
+        val userSam = UserEntity("user_sam", "sam", "Sam", isLocalUser = false, isOnline = false)
+        database.userDao().insertUsers(listOf(localUser, userAlex, userSam))
+
+        val group = conversationRepository.createGroup("Starlight Circle", listOf("user_alex", "user_sam"))
+        assertTrue(group.isGroup)
+        assertEquals("Starlight Circle", group.title)
+        assertTrue(group.id.startsWith("group_"))
+
+        // Verify conversation entity in Room
+        val convEntity = database.conversationDao().getConversationByIdOnce(group.id)
+        assertNotNull(convEntity)
+        assertTrue(convEntity!!.isGroup)
+        assertEquals("Starlight Circle", convEntity.title)
+
+        // Verify members in Room
+        val members = database.conversationMemberDao().getMembersForConversationOnce(group.id)
+        assertEquals(3, members.size)
+        assertTrue(members.any { it.id == "user_saad" })
+        assertTrue(members.any { it.id == "user_alex" })
+        assertTrue(members.any { it.id == "user_sam" })
+
+        // Verify group appears in getConversations() flow
+        val allConversations = conversationRepository.getConversations().first()
+        val foundGroup = allConversations.firstOrNull { it.id == group.id }
+        assertNotNull(foundGroup)
+        assertTrue(foundGroup!!.isGroup)
+        assertEquals("Starlight Circle", foundGroup.title)
     }
 }

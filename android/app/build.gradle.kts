@@ -94,6 +94,7 @@ dependencies {
     testImplementation(libs.androidx.test.ext.junit)
     testImplementation(libs.androidx.room.testing)
     testImplementation(libs.okhttp.mockwebserver)
+    testImplementation("com.squareup.okhttp3:okhttp-tls:4.12.0")
 
     debugImplementation(libs.androidx.compose.ui.tooling)
 }

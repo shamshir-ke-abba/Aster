@@ -52,9 +52,10 @@ class AsterWebSocketTest {
 
     @Test
     fun testClientMessageAuthSerialization() {
-        val auth = ClientMessage.Auth(userId = "user_saad")
+        val auth = ClientMessage.Auth(token = "ast_tok_test_123", userId = "user_saad")
         val json = JSONObject(auth.toJson())
         assertEquals("AUTH", json.getString("type"))
+        assertEquals("ast_tok_test_123", json.getString("token"))
         assertEquals("user_saad", json.getString("userId"))
     }
 
@@ -138,7 +139,9 @@ class AsterWebSocketTest {
 
     @Test
     fun testWebSocketClientInitialStateIsDisconnected() {
-        val client = AsterWebSocketClient(okHttpClient)
+        val context = androidx.test.core.app.ApplicationProvider.getApplicationContext<android.content.Context>()
+        val authStorage = com.aster.app.data.auth.AsterAuthStorage(context)
+        val client = AsterWebSocketClient(okHttpClient, authStorage)
         assertEquals(ConnectionState.DISCONNECTED, client.connectionState.value)
     }
 

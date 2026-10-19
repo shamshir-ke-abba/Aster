@@ -48,9 +48,35 @@ interface ConversationMemberDao {
         """
         SELECT u.* FROM users u
         INNER JOIN conversation_members cm ON u.id = cm.user_id
+        WHERE cm.conversation_id = :conversationId AND u.id != :localUserId
+        LIMIT 1
+        """
+    )
+    fun getOtherMember(conversationId: String, localUserId: String): Flow<UserEntity?>
+
+    @Query(
+        """
+        SELECT u.* FROM users u
+        INNER JOIN conversation_members cm ON u.id = cm.user_id
         WHERE cm.conversation_id = :conversationId AND u.is_local_user = 0
         LIMIT 1
         """
     )
     suspend fun getOtherMemberOnce(conversationId: String): UserEntity?
+
+    @Query(
+        """
+        SELECT u.* FROM users u
+        INNER JOIN conversation_members cm ON u.id = cm.user_id
+        WHERE cm.conversation_id = :conversationId AND u.id != :localUserId
+        LIMIT 1
+        """
+    )
+    suspend fun getOtherMemberOnce(conversationId: String, localUserId: String): UserEntity?
+
+    @Query("DELETE FROM conversation_members WHERE conversation_id = :conversationId AND user_id = :userId")
+    suspend fun removeMember(conversationId: String, userId: String)
+
+    @Query("DELETE FROM conversation_members WHERE conversation_id = :conversationId")
+    suspend fun removeAllMembers(conversationId: String)
 }

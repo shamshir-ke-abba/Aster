@@ -67,6 +67,21 @@ class SessionManager {
         return userSession[userId]
     }
 
+    /**
+     * Actively terminates and removes the session for the given user (e.g. upon credential revocation).
+     */
+    suspend fun closeSession(userId: String, reason: String = "Session terminated") {
+        val session = userSession.remove(userId)
+        if (session != null) {
+            sessionToUser.remove(session)
+            try {
+                session.close(CloseReason(CloseReason.Codes.VIOLATED_POLICY, reason))
+            } catch (e: Exception) {
+                logger.debug("Error closing session for user '$userId': ${e.message}")
+            }
+        }
+    }
+
     fun getSessions(userId: String): List<WebSocketSession> {
         val s = userSession[userId]
         return if (s != null) listOf(s) else emptyList()

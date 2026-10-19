@@ -27,3 +27,8 @@ val AsterStar = Color(0xFFF3F1FF)
 
 /** Used extremely sparingly for special states. */
 val AsterWarm = Color(0xFFFFDFA3)
+
+/** Restrained cosmic crimson for unread activity and critical accents. */
+val AsterCrimson = Color(0xFFD9383A)
+val AsterCrimsonGlow = Color(0x66D9383A)
+

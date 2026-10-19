@@ -246,4 +246,115 @@ class MailboxDatabaseTest {
 
         db.close()
     }
+
+    @Test
+    fun testTokenCreationAndValidation() = runBlocking {
+        val db = MailboxDatabase(":memory:")
+        val token = db.createToken("user_saad", "dev_1")
+        assertTrue(token.startsWith("ast_tok_"))
+
+        val record = db.validateToken(token)
+        assertNotNull(record)
+        assertEquals("user_saad", record.userId)
+        assertEquals("dev_1", record.deviceId)
+        assertNull(record.revokedAt)
+
+        db.close()
+    }
+
+    @Test
+    fun testTokenRevocation() = runBlocking {
+        val db = MailboxDatabase(":memory:")
+        val token = db.createToken("user_saad", "dev_1")
+
+        val revoked = db.revokeToken(token)
+        assertTrue(revoked)
+
+        val record = db.validateToken(token)
+        assertNull(record, "Revoked token must fail validation")
+
+        db.close()
+    }
+
+    @Test
+    fun testRevokeTokensForUser() = runBlocking {
+        val db = MailboxDatabase(":memory:")
+        val token1 = db.createToken("user_saad", "dev_1")
+        val token2 = db.createToken("user_saad", "dev_2")
+        val tokenAlex = db.createToken("user_alex", "dev_3")
+
+        val revokedCount = db.revokeTokensForUser("user_saad")
+        assertEquals(2, revokedCount)
+
+        assertNull(db.validateToken(token1))
+        assertNull(db.validateToken(token2))
+        assertNotNull(db.validateToken(tokenAlex), "Alex token must remain valid")
+
+        db.close()
+    }
+
+    @Test
+    fun testRevokeTokensForDevice() = runBlocking {
+        val db = MailboxDatabase(":memory:")
+        val tokenPhone = db.createToken("user_saad", "device_phone")
+        val tokenTablet = db.createToken("user_saad", "device_tablet")
+
+        val revoked = db.revokeTokensForDevice("device_phone")
+        assertTrue(revoked)
+
+        assertNull(db.validateToken(tokenPhone))
+        assertNotNull(db.validateToken(tokenTablet), "Tablet token must remain valid")
+
+        db.close()
+    }
+
+    @Test
+    fun testInvalidTokenValidationFails() = runBlocking {
+        val db = MailboxDatabase(":memory:")
+        assertNull(db.validateToken(""))
+        assertNull(db.validateToken("   "))
+        assertNull(db.validateToken("ast_tok_nonexistent_token_value_here"))
+        db.close()
+    }
+
+    @Test
+    fun testPushTokenLifecycle() = runBlocking {
+        val db = MailboxDatabase(":memory:")
+        val userId = "user_saad"
+        val dev1 = "dev_phone"
+        val dev2 = "dev_tablet"
+
+        // 1. Initially no tokens
+        assertEquals(emptyList(), db.getPushTokensForUser(userId))
+
+        // 2. Register first push token
+        val reg1 = db.registerPushToken(userId, dev1, "push_tok_12345", endpoint = "https://push.example.com")
+        assertTrue(reg1)
+        assertEquals(listOf("push_tok_12345"), db.getPushTokensForUser(userId))
+
+        // 3. Register second device push token
+        db.registerPushToken(userId, dev2, "push_tok_67890")
+        val tokens = db.getPushTokensForUser(userId)
+        assertEquals(2, tokens.size)
+        assertTrue(tokens.contains("push_tok_12345"))
+        assertTrue(tokens.contains("push_tok_67890"))
+
+        // 4. Update dev1 token (idempotent update on conflict)
+        db.registerPushToken(userId, dev1, "push_tok_updated_123")
+        val updatedTokens = db.getPushTokensForUser(userId)
+        assertEquals(2, updatedTokens.size)
+        assertTrue(updatedTokens.contains("push_tok_updated_123"))
+
+        // 5. Remove token for specific device
+        val devRemoved = db.removePushTokenForDevice(dev2)
+        assertEquals(1, devRemoved)
+        assertEquals(listOf("push_tok_updated_123"), db.getPushTokensForUser(userId))
+
+        // 6. Remove all tokens for user
+        val userRemoved = db.removePushTokensForUser(userId)
+        assertEquals(1, userRemoved)
+        assertEquals(emptyList(), db.getPushTokensForUser(userId))
+
+        db.close()
+    }
 }

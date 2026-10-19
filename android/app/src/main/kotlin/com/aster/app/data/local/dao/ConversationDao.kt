@@ -22,6 +22,9 @@ interface ConversationDao {
     @Query("UPDATE conversations SET updated_at = :updatedAt WHERE id = :conversationId")
     suspend fun updateConversationTimestamp(conversationId: String, updatedAt: Long)
 
+    @Query("UPDATE conversations SET title = :title, updated_at = :updatedAt WHERE id = :conversationId")
+    suspend fun updateConversationTitle(conversationId: String, title: String, updatedAt: Long = System.currentTimeMillis())
+
     @Query("SELECT * FROM conversations WHERE id = :conversationId")
     fun getConversationById(conversationId: String): Flow<ConversationEntity?>
 
@@ -31,6 +34,27 @@ interface ConversationDao {
     @Query("SELECT * FROM conversations ORDER BY updated_at DESC")
     fun getAllConversations(): Flow<List<ConversationEntity>>
 
+    @Query(
+        """
+        SELECT c.* FROM conversations c
+        INNER JOIN conversation_members cm ON c.id = cm.conversation_id
+        WHERE cm.user_id = :userId
+        ORDER BY c.updated_at DESC
+        """
+    )
+    fun getConversationsForUser(userId: String): Flow<List<ConversationEntity>>
+
     @Query("SELECT COUNT(*) FROM conversations")
     suspend fun getConversationCount(): Int
+
+    @Query(
+        """
+        SELECT c.* FROM conversations c
+        INNER JOIN conversation_members cm1 ON c.id = cm1.conversation_id
+        INNER JOIN conversation_members cm2 ON c.id = cm2.conversation_id
+        WHERE c.is_group = 0 AND cm1.user_id = :userId1 AND cm2.user_id = :userId2
+        LIMIT 1
+        """
+    )
+    suspend fun findDirectConversation(userId1: String, userId2: String): ConversationEntity?
 }

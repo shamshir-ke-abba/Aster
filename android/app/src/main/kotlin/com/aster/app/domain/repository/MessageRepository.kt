@@ -15,5 +15,6 @@ interface MessageRepository {
         body: String,
         replyToId: String? = null
     ): Message
+    suspend fun retryMessage(messageId: String): Boolean
     suspend fun updateMessageStatus(messageId: String, status: MessageStatus)
 }

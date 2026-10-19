@@ -4,8 +4,11 @@ android/build/
 android/.idea/
 android/app/build/
 android/local.properties
+.kotlin/
+android/.kotlin/
 
 # Backend
+backend/.gradle/
 backend/.env
 backend/node_modules/
 backend/build/
@@ -21,4 +24,15 @@ backend/build/
 *.pem
 *.key
 *.p12
+*.secret
 .env
+
+# Test artifacts / screenshots
+m7_*.png
+m8_*.png
+m9_*.png
+m10_*.png
+e2e_*.png
+*.db
+*.db-wal
+*.db-shm

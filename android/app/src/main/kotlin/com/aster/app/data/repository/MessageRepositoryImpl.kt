@@ -5,13 +5,17 @@ import com.aster.app.data.local.dao.ConversationDao
 import com.aster.app.data.local.dao.ConversationMemberDao
 import com.aster.app.data.local.dao.MessageDao
 import com.aster.app.data.local.dao.UserDao
+import com.aster.app.data.local.entities.ConversationEntity
+import com.aster.app.data.local.entities.ConversationMemberEntity
 import com.aster.app.data.local.entities.MessageEntity
+import com.aster.app.data.local.entities.UserEntity
 import com.aster.app.data.network.AsterWebSocketClient
 import com.aster.app.data.network.ClientMessage
 import com.aster.app.data.network.ConnectionState
 import com.aster.app.domain.model.Message
 import com.aster.app.domain.model.MessageStatus
 import com.aster.app.domain.repository.MessageRepository
+import com.aster.app.ui.notification.AsterNotificationManager
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -28,7 +32,8 @@ class MessageRepositoryImpl @Inject constructor(
     private val conversationDao: ConversationDao,
     private val conversationMemberDao: ConversationMemberDao,
     private val userDao: UserDao,
-    private val webSocketClient: AsterWebSocketClient
+    private val webSocketClient: AsterWebSocketClient,
+    private val notificationManager: AsterNotificationManager? = null
 ) : MessageRepository {
 
     private val TAG = "MessageRepository"
@@ -58,23 +63,111 @@ class MessageRepositoryImpl @Inject constructor(
         // Always sends ACK_RECEIVED back to server even on duplicate frame
         scope.launch {
             webSocketClient.incomingMessages.collect { msg ->
-                val entity = MessageEntity(
-                    id = msg.messageId,
-                    conversationId = msg.conversationId,
-                    senderId = msg.senderId,
-                    body = msg.body,
-                    createdAt = msg.timestamp,
-                    status = MessageStatus.DELIVERED
-                )
-                val rowId = messageDao.insertMessageIfNotExists(entity)
-                if (rowId != -1L) {
-                    conversationDao.updateConversationTimestamp(msg.conversationId, msg.timestamp)
-                    Log.i(TAG, "Inserted incoming message ${msg.messageId} into Room")
-                } else {
-                    Log.i(TAG, "Duplicate incoming message ${msg.messageId} ignored by Room uniqueness")
+                try {
+                    // 1. Ensure sender exists in DB to prevent foreign key constraint violations
+                    val sender = userDao.getUserByIdOnce(msg.senderId)
+                    if (sender == null) {
+                        val displayName = msg.senderId.removePrefix("user_").replaceFirstChar { it.uppercase() }
+                        userDao.insertUser(
+                            UserEntity(
+                                id = msg.senderId,
+                                username = msg.senderId.removePrefix("user_"),
+                                displayName = displayName,
+                                isLocalUser = false,
+                                isOnline = true
+                            )
+                        )
+                    }
+
+                    // 2. Ensure conversation exists in DB to prevent foreign key constraint violations
+                    val conv = conversationDao.getConversationByIdOnce(msg.conversationId)
+                    if (conv == null) {
+                        val localUser = userDao.getLocalUserOnce()
+                        val localUserId = localUser?.id ?: webSocketClient.authStorage.getAuthenticatedUserId().orEmpty()
+                        if (msg.conversationId.startsWith("group_")) {
+                            conversationDao.insertConversation(
+                                ConversationEntity(
+                                    id = msg.conversationId,
+                                    title = "Group",
+                                    isGroup = true,
+                                    createdAt = msg.timestamp,
+                                    updatedAt = msg.timestamp
+                                )
+                            )
+                            val members = mutableListOf(
+                                ConversationMemberEntity(msg.conversationId, msg.senderId, "MEMBER", msg.timestamp)
+                            )
+                            if (localUserId.isNotBlank()) {
+                                members.add(ConversationMemberEntity(msg.conversationId, localUserId, "MEMBER", msg.timestamp))
+                            }
+                            conversationMemberDao.insertMembers(members)
+                            webSocketClient.getGroups()
+                            webSocketClient.getGroupMembers(msg.conversationId)
+                        } else {
+                            val senderName = msg.senderId.removePrefix("user_").replaceFirstChar { it.uppercase() }
+                            conversationDao.insertConversation(
+                                ConversationEntity(
+                                    id = msg.conversationId,
+                                    title = senderName,
+                                    isGroup = false,
+                                    createdAt = msg.timestamp,
+                                    updatedAt = msg.timestamp
+                                )
+                            )
+                            val members = mutableListOf(
+                                ConversationMemberEntity(msg.conversationId, msg.senderId, "MEMBER", msg.timestamp)
+                            )
+                            if (localUserId.isNotBlank()) {
+                                members.add(ConversationMemberEntity(msg.conversationId, localUserId, "MEMBER", msg.timestamp))
+                            }
+                            conversationMemberDao.insertMembers(members)
+                        }
+                    }
+
+                    val localUser = userDao.getLocalUserOnce()
+                    val localUserId = localUser?.id ?: webSocketClient.authStorage.getAuthenticatedUserId().orEmpty()
+                    val isActivelyViewed = notificationManager?.getActiveConversation() == msg.conversationId
+
+                    val initialStatus = if (isActivelyViewed) MessageStatus.READ else MessageStatus.DELIVERED
+
+                    val entity = MessageEntity(
+                        id = msg.messageId,
+                        conversationId = msg.conversationId,
+                        senderId = msg.senderId,
+                        body = msg.body,
+                        createdAt = msg.timestamp,
+                        status = initialStatus
+                    )
+                    val rowId = messageDao.insertMessageIfNotExists(entity)
+                    if (rowId != -1L) {
+                        conversationDao.updateConversationTimestamp(msg.conversationId, msg.timestamp)
+                        Log.i(TAG, "Inserted incoming message ${msg.messageId} into Room")
+
+                        // Dispatch system notification if conversation is not currently being viewed on-screen,
+                        // message is not sent by local user, and message is brand new (not a replay/duplicate)
+                        if (!isActivelyViewed && msg.senderId != localUserId && notificationManager != null) {
+                            val updatedConv = conversationDao.getConversationByIdOnce(msg.conversationId)
+                            val conversationTitle = updatedConv?.title ?: if (msg.conversationId.startsWith("group_")) "Group" else (sender?.displayName ?: "Unknown")
+                            val senderDisplayName = sender?.displayName ?: msg.senderId.removePrefix("user_").replaceFirstChar { it.uppercase() }
+                            val isGroup = updatedConv?.isGroup ?: msg.conversationId.startsWith("group_")
+
+                            notificationManager.showMessageNotification(
+                                conversationId = msg.conversationId,
+                                conversationTitle = conversationTitle,
+                                isGroup = isGroup,
+                                senderDisplayName = senderDisplayName,
+                                messageText = msg.body,
+                                messageTimestamp = msg.timestamp
+                            )
+                        }
+                    } else {
+                        Log.i(TAG, "Duplicate incoming message ${msg.messageId} ignored by Room uniqueness")
+                    }
+                    // Confirm receipt over network regardless of whether newly inserted or duplicate
+                    webSocketClient.sendAckReceived(msg.messageId)
+                } catch (e: Exception) {
+                    Log.e(TAG, "Error handling incoming message ${msg.messageId}: ${e.message}", e)
                 }
-                // Confirm receipt over network regardless of whether newly inserted or duplicate
-                webSocketClient.sendAckReceived(msg.messageId)
             }
         }
 
@@ -84,20 +177,27 @@ class MessageRepositoryImpl @Inject constructor(
             webSocketClient.connectionState.collect { state ->
                 if (state == ConnectionState.CONNECTED) {
                     val localUser = userDao.getLocalUserOnce()
-                    val localUserId = localUser?.id ?: "user_saad"
-                    val pendingMessages = messageDao.getPendingMessages(localUserId)
-                    for (pending in pendingMessages) {
-                        val recipient = conversationMemberDao.getOtherMemberOnce(pending.conversationId)
-                        val recipientId = recipient?.id ?: ""
-                        webSocketClient.sendMessage(
-                            ClientMessage.SendMessage(
-                                messageId = pending.id,
-                                conversationId = pending.conversationId,
-                                recipientId = recipientId,
-                                body = pending.body,
-                                timestamp = pending.createdAt
+                    val localUserId = localUser?.id ?: webSocketClient.authStorage.getAuthenticatedUserId().orEmpty()
+                    if (localUserId.isNotBlank()) {
+                        val pendingMessages = messageDao.getPendingMessages(localUserId)
+                        for (pending in pendingMessages) {
+                            val isGroup = pending.conversationId.startsWith("group_")
+                            val recipientId = if (isGroup) {
+                                null
+                            } else {
+                                val recipient = conversationMemberDao.getOtherMemberOnce(pending.conversationId, localUserId)
+                                recipient?.id ?: ""
+                            }
+                            webSocketClient.sendMessage(
+                                ClientMessage.SendMessage(
+                                    messageId = pending.id,
+                                    conversationId = pending.conversationId,
+                                    recipientId = recipientId,
+                                    body = pending.body,
+                                    timestamp = pending.createdAt
+                                )
                             )
-                        )
+                        }
                     }
                 }
             }
@@ -141,8 +241,7 @@ class MessageRepositoryImpl @Inject constructor(
         conversationDao.updateConversationTimestamp(conversationId, timestamp)
 
         // 3. Attempt WebSocket dispatch
-        val recipient = conversationMemberDao.getOtherMemberOnce(conversationId)
-        val recipientId = recipient?.id ?: ""
+        val recipientId = resolveRecipientId(conversationId, senderId)
         webSocketClient.sendMessage(
             ClientMessage.SendMessage(
                 messageId = messageId,
@@ -155,6 +254,42 @@ class MessageRepositoryImpl @Inject constructor(
 
         // 4. Return message in SENDING state
         return sendingEntity.toDomain()
+    }
+
+    override suspend fun retryMessage(messageId: String): Boolean {
+        val message = messageDao.getMessageById(messageId) ?: return false
+        if (message.status != MessageStatus.FAILED && message.status != MessageStatus.SENDING) {
+            return false
+        }
+        val recipientId = resolveRecipientId(message.conversationId, message.senderId)
+        messageDao.updateMessageStatus(messageId, MessageStatus.SENDING)
+        return webSocketClient.sendMessage(
+            ClientMessage.SendMessage(
+                messageId = message.id,
+                conversationId = message.conversationId,
+                recipientId = recipientId,
+                body = message.body,
+                timestamp = message.createdAt
+            )
+        )
+    }
+
+    private suspend fun resolveRecipientId(conversationId: String, senderId: String): String? {
+        if (conversationId.startsWith("group_")) return null
+        val recipient = conversationMemberDao.getOtherMemberOnce(conversationId, senderId)
+            ?: conversationMemberDao.getOtherMemberOnce(conversationId)
+        if (recipient != null && recipient.id.isNotBlank()) {
+            return recipient.id
+        }
+        // Fallback for deterministic conv_userA_userB direct conversations
+        if (conversationId.startsWith("conv_")) {
+            val match = Regex("(user_[a-zA-Z0-9_]+)_(user_[a-zA-Z0-9_]+)").find(conversationId.removePrefix("conv_"))
+            if (match != null) {
+                val (u1, u2) = match.destructured
+                return if (u1 == senderId) u2 else u1
+            }
+        }
+        return ""
     }
 
     override suspend fun updateMessageStatus(messageId: String, status: MessageStatus) {

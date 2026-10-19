@@ -12,5 +12,12 @@ interface ConversationRepository {
     fun getConversation(conversationId: String): Flow<Conversation?>
     fun getConversationMembers(conversationId: String): Flow<List<User>>
     suspend fun createConversation(conversation: Conversation, memberIds: List<String>)
+    suspend fun getOrCreateDirectConversation(otherUserId: String): Conversation
     suspend fun markConversationAsRead(conversationId: String)
+    suspend fun createGroup(name: String, memberIds: List<String>): Conversation
+    suspend fun refreshGroups()
+    suspend fun addGroupMember(groupId: String, userId: String)
+    suspend fun removeGroupMember(groupId: String, userId: String)
+    suspend fun leaveGroup(groupId: String)
+    suspend fun renameGroup(groupId: String, newName: String)
 }

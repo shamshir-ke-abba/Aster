@@ -1,20 +1,33 @@
 package com.aster.app.data.repository
 
+import android.util.Log
 import com.aster.app.data.local.dao.ConversationDao
 import com.aster.app.data.local.dao.ConversationMemberDao
 import com.aster.app.data.local.dao.MessageDao
 import com.aster.app.data.local.dao.UserDao
 import com.aster.app.data.local.entities.ConversationEntity
 import com.aster.app.data.local.entities.ConversationMemberEntity
+import com.aster.app.data.local.entities.UserEntity
+import com.aster.app.data.network.AsterWebSocketClient
+import com.aster.app.data.network.ConnectionState
 import com.aster.app.domain.model.Conversation
 import com.aster.app.domain.model.User
 import com.aster.app.domain.repository.ConversationRepository
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withTimeoutOrNull
+import java.util.UUID
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -24,63 +37,201 @@ class ConversationRepositoryImpl @Inject constructor(
     private val conversationDao: ConversationDao,
     private val conversationMemberDao: ConversationMemberDao,
     private val messageDao: MessageDao,
-    private val userDao: UserDao
+    private val userDao: UserDao,
+    private val webSocketClient: AsterWebSocketClient
 ) : ConversationRepository {
+
+    private val TAG = "ConversationRepo"
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val mutex = Mutex()
+
+    init {
+        // Coroutine 1: On connection established, sync groups from server
+        scope.launch {
+            webSocketClient.connectionState.collect { state ->
+                if (state == ConnectionState.CONNECTED) {
+                    Log.d(TAG, "Connected to server; requesting active groups list")
+                    webSocketClient.getGroups()
+                }
+            }
+        }
+
+        // Coroutine 2: Handle group lists from server
+        scope.launch {
+            webSocketClient.groupLists.collect { groupList ->
+                Log.d(TAG, "Syncing ${groupList.groups.size} groups into Room")
+                val localUser = userDao.getLocalUserOnce()
+                val localUserId = localUser?.id.orEmpty()
+
+                for (g in groupList.groups) {
+                    val existing = conversationDao.getConversationByIdOnce(g.id)
+                    if (existing == null) {
+                        conversationDao.insertConversation(
+                            ConversationEntity(
+                                id = g.id,
+                                title = g.name,
+                                isGroup = true,
+                                createdAt = g.createdAt,
+                                updatedAt = g.updatedAt
+                            )
+                        )
+                        if (localUserId.isNotBlank()) {
+                            conversationMemberDao.insertMember(
+                                ConversationMemberEntity(
+                                    conversationId = g.id,
+                                    userId = localUserId,
+                                    role = g.role,
+                                    joinedAt = g.createdAt
+                                )
+                            )
+                        }
+                    } else {
+                        conversationDao.updateConversationTitle(g.id, g.name, g.updatedAt)
+                    }
+                    // Fetch full members for this group
+                    webSocketClient.getGroupMembers(g.id)
+                }
+            }
+        }
+
+        // Coroutine 3: Handle group members list from server
+        scope.launch {
+            webSocketClient.groupMembersLists.collect { membersList ->
+                Log.d(TAG, "Syncing ${membersList.members.size} members for group ${membersList.groupId}")
+                val currentAuthUserId = webSocketClient.authStorage.getAuthenticatedUserId()
+                for (m in membersList.members) {
+                    if (userDao.getUserByIdOnce(m.userId) == null) {
+                        val dName = m.userId.removePrefix("user_").replaceFirstChar { it.uppercase() }
+                        userDao.insertUser(
+                            UserEntity(
+                                id = m.userId,
+                                username = m.userId.removePrefix("user_"),
+                                displayName = dName,
+                                isLocalUser = (m.userId == currentAuthUserId),
+                                isOnline = true
+                            )
+                        )
+                    }
+                    conversationMemberDao.insertMember(
+                        ConversationMemberEntity(
+                            conversationId = membersList.groupId,
+                            userId = m.userId,
+                            role = m.role,
+                            joinedAt = m.joinedAt
+                        )
+                    )
+                }
+            }
+        }
+
+        // Coroutine 4: Handle real-time group events from server
+        scope.launch {
+            webSocketClient.groupEvents.collect { event ->
+                Log.i(TAG, "Received group event ${event.eventType} for ${event.groupId}")
+                when (event.eventType) {
+                    "CREATED" -> {
+                        webSocketClient.getGroups()
+                    }
+                    "RENAMED" -> {
+                        event.name?.let { newTitle ->
+                            conversationDao.updateConversationTitle(event.groupId, newTitle, event.timestamp)
+                        }
+                    }
+                    "MEMBER_ADDED" -> {
+                        event.targetUserId?.let { uid ->
+                            val currentAuthUserId = webSocketClient.authStorage.getAuthenticatedUserId()
+                            if (userDao.getUserByIdOnce(uid) == null) {
+                                val dName = uid.removePrefix("user_").replaceFirstChar { it.uppercase() }
+                                userDao.insertUser(
+                                    UserEntity(
+                                        id = uid,
+                                        username = uid.removePrefix("user_"),
+                                        displayName = dName,
+                                        isLocalUser = (uid == currentAuthUserId),
+                                        isOnline = true
+                                    )
+                                )
+                            }
+                            conversationMemberDao.insertMember(
+                                ConversationMemberEntity(
+                                    conversationId = event.groupId,
+                                    userId = uid,
+                                    role = "MEMBER",
+                                    joinedAt = event.timestamp
+                                )
+                            )
+                        }
+                    }
+                    "MEMBER_REMOVED", "MEMBER_LEFT" -> {
+                        val target = event.targetUserId ?: event.actorId
+                        conversationMemberDao.removeMember(event.groupId, target)
+                    }
+                }
+            }
+        }
+    }
 
     override fun getConversations(): Flow<List<Conversation>> {
         return userDao.getLocalUser().flatMapLatest { localUserEntity ->
             val localUserId = localUserEntity?.id.orEmpty()
-            conversationDao.getAllConversations().flatMapLatest { conversationEntities ->
-                if (conversationEntities.isEmpty()) {
-                    flowOf(emptyList())
-                } else {
-                    val flows = conversationEntities.map { convEntity ->
-                        combine(
-                            messageDao.getLatestMessage(convEntity.id),
-                            messageDao.getUnreadCount(convEntity.id, localUserId),
-                            conversationMemberDao.getOtherMember(convEntity.id)
-                        ) { latestMsg, unreadCount, otherMemberEntity ->
-                            Conversation(
-                                id = convEntity.id,
-                                title = if (!convEntity.isGroup && otherMemberEntity != null) {
-                                    otherMemberEntity.displayName
-                                } else {
-                                    convEntity.title
-                                },
-                                isGroup = convEntity.isGroup,
-                                createdAt = convEntity.createdAt,
-                                lastMessage = latestMsg?.toDomain(),
-                                unreadCount = unreadCount,
-                                otherMember = otherMemberEntity?.toDomain()
-                            )
+            if (localUserId.isBlank()) {
+                flowOf(emptyList())
+            } else {
+                conversationDao.getConversationsForUser(localUserId).flatMapLatest { conversationEntities ->
+                    if (conversationEntities.isEmpty()) {
+                        flowOf(emptyList())
+                    } else {
+                        val flows = conversationEntities.map { convEntity ->
+                            combine(
+                                messageDao.getLatestMessage(convEntity.id),
+                                messageDao.getUnreadCount(convEntity.id, localUserId),
+                                conversationMemberDao.getOtherMember(convEntity.id, localUserId)
+                            ) { latestMsg, unreadCount, otherMemberEntity ->
+                                Conversation(
+                                    id = convEntity.id,
+                                    title = if (!convEntity.isGroup && otherMemberEntity != null) {
+                                        otherMemberEntity.displayName
+                                    } else {
+                                        convEntity.title
+                                    },
+                                    isGroup = convEntity.isGroup,
+                                    createdAt = convEntity.createdAt,
+                                    lastMessage = latestMsg?.toDomain(),
+                                    unreadCount = unreadCount,
+                                    otherMember = otherMemberEntity?.toDomain()
+                                )
+                            }
                         }
+                        combine(flows) { it.toList() }
                     }
-                    combine(flows) { it.toList() }
                 }
             }
         }
     }
 
     override fun getConversation(conversationId: String): Flow<Conversation?> {
-        return combine(
-            conversationDao.getConversationById(conversationId),
-            messageDao.getLatestMessage(conversationId),
-            conversationMemberDao.getOtherMember(conversationId)
-        ) { convEntity, latestMsg, otherMemberEntity ->
-            convEntity?.let {
-                Conversation(
-                    id = it.id,
-                    title = if (!it.isGroup && otherMemberEntity != null) {
-                        otherMemberEntity.displayName
-                    } else {
-                        it.title
-                    },
-                    isGroup = it.isGroup,
-                    createdAt = it.createdAt,
-                    lastMessage = latestMsg?.toDomain(),
-                    unreadCount = 0,
-                    otherMember = otherMemberEntity?.toDomain()
-                )
+        return userDao.getLocalUser().flatMapLatest { localUserEntity ->
+            val localUserId = localUserEntity?.id.orEmpty()
+            combine(
+                conversationDao.getConversationById(conversationId),
+                messageDao.getLatestMessage(conversationId),
+                conversationMemberDao.getOtherMember(conversationId, localUserId)
+            ) { convEntity, latestMsg, otherMemberEntity ->
+                convEntity?.let {
+                    Conversation(
+                        id = it.id,
+                        title = if (!it.isGroup && otherMemberEntity != null) {
+                            otherMemberEntity.displayName
+                        } else {
+                            it.title
+                        },
+                        isGroup = it.isGroup,
+                        createdAt = it.createdAt,
+                        lastMessage = latestMsg?.toDomain(),
+                        unreadCount = 0,
+                        otherMember = otherMemberEntity?.toDomain()
+                    )
+                }
             }
         }
     }
@@ -120,5 +271,190 @@ class ConversationRepositoryImpl @Inject constructor(
         val localUser = userDao.getLocalUserOnce()
         val localUserId = localUser?.id.orEmpty()
         messageDao.markMessagesAsRead(conversationId, localUserId)
+    }
+
+    override suspend fun getOrCreateDirectConversation(otherUserId: String): Conversation = mutex.withLock {
+        val localUser = userDao.getLocalUserOnce()
+            ?: throw IllegalStateException("Local user not found in database")
+        require(otherUserId != localUser.id) { "Cannot create direct conversation with self" }
+        val otherUser = userDao.getUserByIdOnce(otherUserId)
+            ?: throw IllegalArgumentException("User $otherUserId not found")
+
+        // 1. Check if direct 1:1 conversation already exists
+        val existingEntity = conversationDao.findDirectConversation(localUser.id, otherUserId)
+        if (existingEntity != null) {
+            val latestMsg = messageDao.getLatestMessageOnce(existingEntity.id)
+            return@withLock Conversation(
+                id = existingEntity.id,
+                title = otherUser.displayName,
+                isGroup = false,
+                createdAt = existingEntity.createdAt,
+                lastMessage = latestMsg?.toDomain(),
+                unreadCount = 0,
+                otherMember = otherUser.toDomain()
+            )
+        }
+
+        // 2. Generate deterministic ID for the pair
+        val sortedPair = listOf(localUser.id, otherUserId).sorted()
+        val convId = "conv_${sortedPair[0]}_${sortedPair[1]}"
+
+        val existingById = conversationDao.getConversationByIdOnce(convId)
+        if (existingById != null) {
+            val latestMsg = messageDao.getLatestMessageOnce(existingById.id)
+            return@withLock Conversation(
+                id = existingById.id,
+                title = otherUser.displayName,
+                isGroup = false,
+                createdAt = existingById.createdAt,
+                lastMessage = latestMsg?.toDomain(),
+                unreadCount = 0,
+                otherMember = otherUser.toDomain()
+            )
+        }
+
+        // 3. Create conversation and member rows atomically
+        val now = System.currentTimeMillis()
+        val convEntity = ConversationEntity(
+            id = convId,
+            title = otherUser.displayName,
+            isGroup = false,
+            createdAt = now,
+            updatedAt = now
+        )
+        conversationDao.insertConversation(convEntity)
+
+        val members = listOf(
+            ConversationMemberEntity(
+                conversationId = convId,
+                userId = localUser.id,
+                role = "MEMBER",
+                joinedAt = now
+            ),
+            ConversationMemberEntity(
+                conversationId = convId,
+                userId = otherUserId,
+                role = "MEMBER",
+                joinedAt = now
+            )
+        )
+        conversationMemberDao.insertMembers(members)
+
+        Conversation(
+            id = convId,
+            title = otherUser.displayName,
+            isGroup = false,
+            createdAt = now,
+            lastMessage = null,
+            unreadCount = 0,
+            otherMember = otherUser.toDomain()
+        )
+    }
+
+    override suspend fun createGroup(name: String, memberIds: List<String>): Conversation = mutex.withLock {
+        val localUser = userDao.getLocalUserOnce()
+            ?: throw IllegalStateException("Local user not found in database")
+        val now = System.currentTimeMillis()
+        val requestId = UUID.randomUUID().toString()
+
+        // 1. Dispatch CreateGroup over WebSocket
+        webSocketClient.createGroup(name, memberIds, requestId)
+
+        // 2. Wait for server acknowledgement with timeout
+        val ok = withTimeoutOrNull(3000) {
+            webSocketClient.groupOperations.first { it.requestId == requestId }
+        }
+        val groupId = ok?.groupId ?: ("group_" + UUID.randomUUID().toString().replace("-", "").take(16))
+
+        // 3. Persist locally in Room
+        val convEntity = ConversationEntity(
+            id = groupId,
+            title = name,
+            isGroup = true,
+            createdAt = now,
+            updatedAt = now
+        )
+        conversationDao.insertConversation(convEntity)
+
+        val allMembers = (memberIds + localUser.id).distinct()
+        val memberEntities = allMembers.map { uid ->
+            val role = if (uid == localUser.id) "CREATOR" else "MEMBER"
+            if (userDao.getUserByIdOnce(uid) == null) {
+                val dName = uid.removePrefix("user_").replaceFirstChar { it.uppercase() }
+                userDao.insertUser(
+                    UserEntity(
+                        id = uid,
+                        username = uid.removePrefix("user_"),
+                        displayName = dName,
+                        isLocalUser = (uid == localUser.id),
+                        isOnline = true
+                    )
+                )
+            }
+            ConversationMemberEntity(
+                conversationId = groupId,
+                userId = uid,
+                role = role,
+                joinedAt = now
+            )
+        }
+        conversationMemberDao.insertMembers(memberEntities)
+
+        Conversation(
+            id = groupId,
+            title = name,
+            isGroup = true,
+            createdAt = now,
+            lastMessage = null,
+            unreadCount = 0,
+            otherMember = null
+        )
+    }
+
+    override suspend fun refreshGroups() {
+        webSocketClient.getGroups()
+    }
+
+    override suspend fun addGroupMember(groupId: String, userId: String) {
+        webSocketClient.addGroupMember(groupId, userId)
+        val now = System.currentTimeMillis()
+        if (userDao.getUserByIdOnce(userId) == null) {
+            val dName = userId.removePrefix("user_").replaceFirstChar { it.uppercase() }
+            userDao.insertUser(
+                UserEntity(
+                    id = userId,
+                    username = userId.removePrefix("user_"),
+                    displayName = dName,
+                    isLocalUser = false,
+                    isOnline = true
+                )
+            )
+        }
+        conversationMemberDao.insertMember(
+            ConversationMemberEntity(
+                conversationId = groupId,
+                userId = userId,
+                role = "MEMBER",
+                joinedAt = now
+            )
+        )
+    }
+
+    override suspend fun removeGroupMember(groupId: String, userId: String) {
+        webSocketClient.removeGroupMember(groupId, userId)
+        conversationMemberDao.removeMember(groupId, userId)
+    }
+
+    override suspend fun leaveGroup(groupId: String) {
+        val localUser = userDao.getLocalUserOnce()
+        webSocketClient.leaveGroup(groupId)
+        if (localUser != null) {
+            conversationMemberDao.removeMember(groupId, localUser.id)
+        }
+    }
+
+    override suspend fun renameGroup(groupId: String, newName: String) {
+        webSocketClient.renameGroup(groupId, newName)
+        conversationDao.updateConversationTitle(groupId, newName)
     }
 }

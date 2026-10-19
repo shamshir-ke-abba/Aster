@@ -35,6 +35,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -83,11 +84,18 @@ fun ChatScreen(
 ) {
     val uiState by viewModel.uiState.collectAsState()
 
+    DisposableEffect(viewModel.conversationId) {
+        onDispose {
+            viewModel.onScreenExited()
+        }
+    }
+
     ChatScreenContent(
         uiState = uiState,
         onBackClick = onBackClick,
         onInputTextChanged = viewModel::onInputTextChanged,
         onSendMessage = viewModel::sendMessage,
+        onRetryMessage = viewModel::retryMessage,
         modifier = modifier
     )
 }
@@ -98,6 +106,7 @@ fun ChatScreenContent(
     onBackClick: () -> Unit,
     onInputTextChanged: (String) -> Unit,
     onSendMessage: () -> Unit,
+    onRetryMessage: (String) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val statusBarPadding = WindowInsets.statusBars.asPaddingValues()
@@ -139,6 +148,8 @@ fun ChatScreenContent(
             // Top App Bar
             ChatTopBar(
                 title = uiState.conversation?.title ?: "Chat",
+                isGroup = uiState.conversation?.isGroup == true,
+                memberCount = uiState.members.size,
                 isOnline = uiState.otherUser?.isOnline ?: false,
                 onBackClick = onBackClick
             )
@@ -170,9 +181,18 @@ fun ChatScreenContent(
                         key = { it.id }
                     ) { message ->
                         val isOutgoing = message.senderId == uiState.localUser?.id
+                        val senderName = if (!isOutgoing && (uiState.conversation?.isGroup == true)) {
+                            uiState.members.firstOrNull { it.id == message.senderId }?.displayName
+                                ?: message.senderId.removePrefix("user_").replaceFirstChar { it.uppercase() }
+                        } else null
+
                         MessageBubble(
                             message = message,
-                            isOutgoing = isOutgoing
+                            isOutgoing = isOutgoing,
+                            senderDisplayName = senderName,
+                            onRetry = if (isOutgoing && (message.status == MessageStatus.FAILED || message.status == MessageStatus.SENDING)) {
+                                { onRetryMessage(message.id) }
+                            } else null
                         )
                     }
                 }
@@ -195,6 +215,8 @@ fun ChatScreenContent(
 @Composable
 private fun ChatTopBar(
     title: String,
+    isGroup: Boolean = false,
+    memberCount: Int = 0,
     isOnline: Boolean,
     onBackClick: () -> Unit,
     modifier: Modifier = Modifier
@@ -227,38 +249,56 @@ private fun ChatTopBar(
 
         Spacer(modifier = Modifier.width(8.dp))
 
-        // Conversation Title & Presence Indicator
-        Row(
+        // Conversation Title & Presence / Member Count
+        Column(
             modifier = Modifier.weight(1f),
-            verticalAlignment = Alignment.CenterVertically
+            verticalArrangement = Arrangement.Center
         ) {
-            Text(
-                text = title,
-                style = MaterialTheme.typography.bodyLarge.copy(
-                    color = AsterStar,
-                    fontWeight = FontWeight.SemiBold,
-                    fontSize = 18.sp
-                ),
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.semantics { heading() }
-            )
-
-            Spacer(modifier = Modifier.width(8.dp))
-
-            // Presence indicator
-            if (isOnline) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(
-                    text = "✦",
-                    color = AsterViolet,
-                    fontSize = 14.sp
+                    text = title,
+                    style = MaterialTheme.typography.bodyLarge.copy(
+                        color = AsterStar,
+                        fontWeight = FontWeight.SemiBold,
+                        fontSize = 17.sp
+                    ),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.semantics { heading() }
                 )
-            } else {
+
+                Spacer(modifier = Modifier.width(6.dp))
+
+                if (isGroup) {
+                    Text(
+                        text = "✦✦",
+                        color = AsterViolet,
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                } else if (isOnline) {
+                    Text(
+                        text = "✦",
+                        color = AsterViolet,
+                        fontSize = 14.sp
+                    )
+                } else {
+                    Text(
+                        text = "·",
+                        color = AsterGlow.copy(alpha = 0.5f),
+                        fontSize = 18.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+            }
+
+            if (isGroup && memberCount > 0) {
                 Text(
-                    text = "·",
-                    color = AsterGlow.copy(alpha = 0.5f),
-                    fontSize = 18.sp,
-                    fontWeight = FontWeight.Bold
+                    text = "$memberCount members",
+                    style = MaterialTheme.typography.labelSmall.copy(
+                        color = AsterGlow.copy(alpha = 0.6f),
+                        fontSize = 11.sp
+                    )
                 )
             }
         }
@@ -273,6 +313,8 @@ private fun ChatTopBar(
 private fun MessageBubble(
     message: Message,
     isOutgoing: Boolean,
+    senderDisplayName: String? = null,
+    onRetry: (() -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     val alignment = if (isOutgoing) Alignment.End else Alignment.Start
@@ -295,6 +337,18 @@ private fun MessageBubble(
                 .padding(horizontal = 14.dp, vertical = 10.dp)
         ) {
             Column {
+                if (!isOutgoing && senderDisplayName != null) {
+                    Text(
+                        text = senderDisplayName,
+                        style = MaterialTheme.typography.labelSmall.copy(
+                            color = AsterViolet,
+                            fontWeight = FontWeight.SemiBold,
+                            fontSize = 11.sp
+                        )
+                    )
+                    Spacer(modifier = Modifier.height(2.dp))
+                }
+
                 // Message body
                 Text(
                     text = message.body,
@@ -322,7 +376,7 @@ private fun MessageBubble(
                     )
 
                     if (isOutgoing) {
-                        MessageStatusIndicator(status = message.status)
+                        MessageStatusIndicator(status = message.status, onRetry = onRetry)
                     }
                 }
             }
@@ -331,7 +385,10 @@ private fun MessageBubble(
 }
 
 @Composable
-private fun MessageStatusIndicator(status: MessageStatus) {
+private fun MessageStatusIndicator(
+    status: MessageStatus,
+    onRetry: (() -> Unit)? = null
+) {
     when (status) {
         MessageStatus.SENDING -> {
             Text(
@@ -365,8 +422,9 @@ private fun MessageStatusIndicator(status: MessageStatus) {
             Text(
                 text = "!",
                 color = MaterialTheme.colorScheme.error,
-                fontSize = 10.sp,
-                fontWeight = FontWeight.Bold
+                fontSize = 12.sp,
+                fontWeight = FontWeight.Bold,
+                modifier = if (onRetry != null) Modifier.clickable(onClick = onRetry) else Modifier
             )
         }
     }
