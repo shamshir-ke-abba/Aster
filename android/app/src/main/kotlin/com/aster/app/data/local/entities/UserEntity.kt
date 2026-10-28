@@ -15,14 +15,23 @@ data class UserEntity(
     @ColumnInfo(name = "is_local_user")
     val isLocalUser: Boolean,
     @ColumnInfo(name = "is_online")
-    val isOnline: Boolean
+    val isOnline: Boolean,
+    @ColumnInfo(name = "last_seen", defaultValue = "0")
+    val lastSeen: Long = 0L,
+    @ColumnInfo(name = "is_deleted", defaultValue = "0")
+    val isDeleted: Boolean = false,
+    @ColumnInfo(name = "is_blocked", defaultValue = "0")
+    val isBlocked: Boolean = false
 ) {
     fun toDomain(): User = User(
         id = id,
         username = username,
         displayName = displayName,
         isLocalUser = isLocalUser,
-        isOnline = isOnline
+        isOnline = isOnline,
+        lastSeen = lastSeen,
+        isDeleted = isDeleted,
+        isBlocked = isBlocked
     )
 
     companion object {
@@ -31,7 +40,10 @@ data class UserEntity(
             username = user.username,
             displayName = user.displayName,
             isLocalUser = user.isLocalUser,
-            isOnline = user.isOnline
+            isOnline = user.isOnline,
+            lastSeen = user.lastSeen,
+            isDeleted = user.isDeleted,
+            isBlocked = user.isBlocked
         )
     }
 }

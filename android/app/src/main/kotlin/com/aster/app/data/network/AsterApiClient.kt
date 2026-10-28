@@ -17,7 +17,11 @@ import javax.inject.Singleton
 
 sealed interface ApiResult<out T> {
     data class Success<out T>(val data: T) : ApiResult<T>
-    data class Error(val message: String, val statusCode: Int? = null) : ApiResult<Nothing>
+    data class Error(
+        val message: String,
+        val statusCode: Int? = null,
+        val requiresMigration: Boolean = false
+    ) : ApiResult<Nothing>
 }
 
 data class RegistrationResponse(
@@ -25,12 +29,36 @@ data class RegistrationResponse(
     val asterId: String,
     val username: String,
     val displayName: String,
-    val token: String
+    val token: String,
+    val recoveryCode: String? = null
+)
+
+data class RecoveryResponse(
+    val userId: String,
+    val asterId: String,
+    val username: String,
+    val displayName: String,
+    val token: String,
+    val newRecoveryCode: String
 )
 
 data class FriendRequestsPayload(
     val incoming: List<FriendRequestSummary>,
     val outgoing: List<FriendRequestSummary>
+)
+
+data class MessageReadDto(
+    val messageId: String,
+    val conversationId: String,
+    val readerUserId: String,
+    val readAt: Long
+)
+
+data class MessageUnsentDto(
+    val messageId: String,
+    val conversationId: String,
+    val senderId: String,
+    val unsentAt: Long
 )
 
 @Singleton
@@ -51,19 +79,68 @@ open class AsterApiClient @Inject constructor(
         return builder
     }
 
-    suspend fun register(
+    open suspend fun register(
         username: String,
         displayName: String,
+        password: String = "",
         deviceId: String = UUID.randomUUID().toString()
     ): ApiResult<RegistrationResponse> = withContext(Dispatchers.IO) {
         val jsonBody = JSONObject().apply {
             put("username", username.trim())
             put("displayName", displayName.trim())
+            if (password.isNotBlank()) {
+                put("password", password)
+            }
             put("deviceId", deviceId)
         }.toString()
 
         val request = Request.Builder()
-            .url("${baseUrl()}/api/register")
+            .url("${baseUrl()}/api/auth/register")
+            .post(jsonBody.toRequestBody(JSON_MEDIA_TYPE))
+            .build()
+
+        try {
+            val response = okHttpClient.newCall(request).execute()
+            val bodyString = response.body?.string().orEmpty()
+            if (response.isSuccessful) {
+                val json = JSONObject(bodyString)
+                val resp = RegistrationResponse(
+                    userId = json.getString("userId"),
+                    asterId = json.getString("asterId"),
+                    username = json.getString("username"),
+                    displayName = json.getString("displayName"),
+                    token = json.getString("token"),
+                    recoveryCode = json.optString("recoveryCode").takeIf { it.isNotBlank() }
+                )
+                authStorage.saveAuthToken(resp.token)
+                authStorage.saveAuthenticatedUserId(resp.userId)
+                authStorage.saveAsterId(resp.asterId)
+                authStorage.saveUsername(resp.username)
+                authStorage.saveDisplayName(resp.displayName)
+                ApiResult.Success(resp)
+            } else {
+                val err = parseErrorMessage(bodyString, "Registration failed (${response.code})")
+                ApiResult.Error(err, response.code)
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Registration error: ${e.message}", e)
+            ApiResult.Error(sanitizeNetworkException(e))
+        }
+    }
+
+    open suspend fun login(
+        username: String,
+        password: String,
+        deviceId: String = UUID.randomUUID().toString()
+    ): ApiResult<RegistrationResponse> = withContext(Dispatchers.IO) {
+        val jsonBody = JSONObject().apply {
+            put("username", username.trim())
+            put("password", password)
+            put("deviceId", deviceId)
+        }.toString()
+
+        val request = Request.Builder()
+            .url("${baseUrl()}/api/auth/login")
             .post(jsonBody.toRequestBody(JSON_MEDIA_TYPE))
             .build()
 
@@ -85,13 +162,111 @@ open class AsterApiClient @Inject constructor(
                 authStorage.saveUsername(resp.username)
                 authStorage.saveDisplayName(resp.displayName)
                 ApiResult.Success(resp)
+            } else if (response.code == 403 && bodyString.contains("ACCOUNT_MIGRATION_REQUIRED")) {
+                ApiResult.Error(
+                    message = "Account requires password setup to migrate.",
+                    statusCode = 403,
+                    requiresMigration = true
+                )
             } else {
-                val err = parseErrorMessage(bodyString, "Registration failed (${response.code})")
+                val err = parseErrorMessage(bodyString, "Invalid username or password")
                 ApiResult.Error(err, response.code)
             }
         } catch (e: Exception) {
-            Log.e(TAG, "Registration error: ${e.message}", e)
-            ApiResult.Error("Network error: ${e.message ?: "Unable to connect"}")
+            Log.e(TAG, "Login error: ${e.message}", e)
+            ApiResult.Error(sanitizeNetworkException(e))
+        }
+    }
+
+    open suspend fun recoverPassword(
+        username: String,
+        recoveryCode: String,
+        newPassword: String,
+        deviceId: String = UUID.randomUUID().toString()
+    ): ApiResult<RecoveryResponse> = withContext(Dispatchers.IO) {
+        val jsonBody = JSONObject().apply {
+            put("username", username.trim())
+            put("recoveryCode", recoveryCode.trim())
+            put("newPassword", newPassword)
+            put("deviceId", deviceId)
+        }.toString()
+
+        val request = Request.Builder()
+            .url("${baseUrl()}/api/auth/recover")
+            .post(jsonBody.toRequestBody(JSON_MEDIA_TYPE))
+            .build()
+
+        try {
+            val response = okHttpClient.newCall(request).execute()
+            val bodyString = response.body?.string().orEmpty()
+            if (response.isSuccessful) {
+                val json = JSONObject(bodyString)
+                val resp = RecoveryResponse(
+                    userId = json.getString("userId"),
+                    asterId = json.getString("asterId"),
+                    username = json.getString("username"),
+                    displayName = json.getString("displayName"),
+                    token = json.getString("token"),
+                    newRecoveryCode = json.getString("newRecoveryCode")
+                )
+                authStorage.saveAuthToken(resp.token)
+                authStorage.saveAuthenticatedUserId(resp.userId)
+                authStorage.saveAsterId(resp.asterId)
+                authStorage.saveUsername(resp.username)
+                authStorage.saveDisplayName(resp.displayName)
+                ApiResult.Success(resp)
+            } else {
+                val err = parseErrorMessage(bodyString, "Invalid username or recovery code")
+                ApiResult.Error(err, response.code)
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Password recovery error: ${e.message}", e)
+            ApiResult.Error(sanitizeNetworkException(e))
+        }
+    }
+
+    open suspend fun migrateAccount(
+        username: String,
+        newPassword: String,
+        deviceId: String = UUID.randomUUID().toString()
+    ): ApiResult<RegistrationResponse> = withContext(Dispatchers.IO) {
+        val jsonBody = JSONObject().apply {
+            put("username", username.trim())
+            put("newPassword", newPassword)
+            put("deviceId", deviceId)
+        }.toString()
+
+        val request = Request.Builder()
+            .url("${baseUrl()}/api/auth/migrate")
+            .post(jsonBody.toRequestBody(JSON_MEDIA_TYPE))
+            .build()
+
+        try {
+            val response = okHttpClient.newCall(request).execute()
+            val bodyString = response.body?.string().orEmpty()
+            if (response.isSuccessful) {
+                val json = JSONObject(bodyString)
+                val resp = RegistrationResponse(
+                    userId = json.getString("userId"),
+                    asterId = json.getString("asterId"),
+                    username = json.getString("username"),
+                    displayName = json.getString("displayName"),
+                    token = json.getString("token"),
+                    recoveryCode = json.optString("recoveryCode").takeIf { it.isNotBlank() }
+                )
+                authStorage.saveAuthToken(resp.token)
+                authStorage.saveAuthenticatedUserId(resp.userId)
+                authStorage.saveAsterId(resp.asterId)
+                authStorage.saveUsername(resp.username)
+                authStorage.saveDisplayName(resp.displayName)
+                ApiResult.Success(resp)
+            } else {
+                val err = parseErrorMessage(bodyString, "Migration failed (${response.code})")
+                ApiResult.Error(err, response.code)
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Migration error: ${e.message}", e)
+            ApiResult.Error(sanitizeNetworkException(e))
         }
     }
 
@@ -116,7 +291,7 @@ open class AsterApiClient @Inject constructor(
                 ApiResult.Error(parseErrorMessage(bodyString, "Failed to fetch profile"), response.code)
             }
         } catch (e: Exception) {
-            ApiResult.Error("Network error: ${e.message}")
+            ApiResult.Error(sanitizeNetworkException(e))
         }
     }
 
@@ -149,8 +324,20 @@ open class AsterApiClient @Inject constructor(
                 ApiResult.Error(parseErrorMessage(bodyString, "Failed to update profile"), response.code)
             }
         } catch (e: Exception) {
-            ApiResult.Error("Network error: ${e.message}")
+            ApiResult.Error(sanitizeNetworkException(e))
         }
+    }
+
+    private fun parseUserSummary(obj: JSONObject): UserSummary {
+        return UserSummary(
+            userId = obj.getString("userId"),
+            asterId = obj.getString("asterId"),
+            username = obj.getString("username"),
+            displayName = obj.getString("displayName"),
+            isOnline = obj.optBoolean("isOnline", false),
+            lastSeen = obj.optLong("lastSeen", 0L),
+            isDeleted = obj.optBoolean("isDeleted", false)
+        )
     }
 
     suspend fun searchUsers(query: String): ApiResult<List<UserSummary>> = withContext(Dispatchers.IO) {
@@ -164,22 +351,14 @@ open class AsterApiClient @Inject constructor(
                 val array = json.getJSONArray("users")
                 val list = mutableListOf<UserSummary>()
                 for (i in 0 until array.length()) {
-                    val obj = array.getJSONObject(i)
-                    list.add(
-                        UserSummary(
-                            userId = obj.getString("userId"),
-                            asterId = obj.getString("asterId"),
-                            username = obj.getString("username"),
-                            displayName = obj.getString("displayName")
-                        )
-                    )
+                    list.add(parseUserSummary(array.getJSONObject(i)))
                 }
                 ApiResult.Success(list)
             } else {
                 ApiResult.Error(parseErrorMessage(bodyString, "User search failed"), response.code)
             }
         } catch (e: Exception) {
-            ApiResult.Error("Network error: ${e.message}")
+            ApiResult.Error(sanitizeNetworkException(e))
         }
     }
 
@@ -221,7 +400,7 @@ open class AsterApiClient @Inject constructor(
                 ApiResult.Error(parseErrorMessage(bodyString, "Could not send friend request"), response.code)
             }
         } catch (e: Exception) {
-            ApiResult.Error("Network error: ${e.message}")
+            ApiResult.Error(sanitizeNetworkException(e))
         }
     }
 
@@ -242,7 +421,7 @@ open class AsterApiClient @Inject constructor(
                 ApiResult.Error(parseErrorMessage(bodyString, "Could not respond to request"), response.code)
             }
         } catch (e: Exception) {
-            ApiResult.Error("Network error: ${e.message}")
+            ApiResult.Error(sanitizeNetworkException(e))
         }
     }
 
@@ -262,7 +441,7 @@ open class AsterApiClient @Inject constructor(
                 ApiResult.Error(parseErrorMessage(bodyString, "Could not cancel request"), response.code)
             }
         } catch (e: Exception) {
-            ApiResult.Error("Network error: ${e.message}")
+            ApiResult.Error(sanitizeNetworkException(e))
         }
     }
 
@@ -284,7 +463,7 @@ open class AsterApiClient @Inject constructor(
                 ApiResult.Error(parseErrorMessage(bodyString, "Failed to load friend requests"), response.code)
             }
         } catch (e: Exception) {
-            ApiResult.Error("Network error: ${e.message}")
+            ApiResult.Error(sanitizeNetworkException(e))
         }
     }
 
@@ -298,22 +477,14 @@ open class AsterApiClient @Inject constructor(
                 val friendsArray = root.getJSONArray("friends")
                 val list = mutableListOf<UserSummary>()
                 for (i in 0 until friendsArray.length()) {
-                    val obj = friendsArray.getJSONObject(i)
-                    list.add(
-                        UserSummary(
-                            userId = obj.getString("userId"),
-                            asterId = obj.getString("asterId"),
-                            username = obj.getString("username"),
-                            displayName = obj.getString("displayName")
-                        )
-                    )
+                    list.add(parseUserSummary(friendsArray.getJSONObject(i)))
                 }
                 ApiResult.Success(list)
             } else {
                 ApiResult.Error(parseErrorMessage(bodyString, "Failed to load friends"), response.code)
             }
         } catch (e: Exception) {
-            ApiResult.Error("Network error: ${e.message}")
+            ApiResult.Error(sanitizeNetworkException(e))
         }
     }
 
@@ -334,7 +505,7 @@ open class AsterApiClient @Inject constructor(
                 ApiResult.Error(parseErrorMessage(bodyString, "Could not block user"), response.code)
             }
         } catch (e: Exception) {
-            ApiResult.Error("Network error: ${e.message}")
+            ApiResult.Error(sanitizeNetworkException(e))
         }
     }
 
@@ -354,7 +525,7 @@ open class AsterApiClient @Inject constructor(
                 ApiResult.Error(parseErrorMessage(bodyString, "Could not unblock user"), response.code)
             }
         } catch (e: Exception) {
-            ApiResult.Error("Network error: ${e.message}")
+            ApiResult.Error(sanitizeNetworkException(e))
         }
     }
 
@@ -383,11 +554,11 @@ open class AsterApiClient @Inject constructor(
                 ApiResult.Error(parseErrorMessage(bodyString, "Failed to load blocked users"), response.code)
             }
         } catch (e: Exception) {
-            ApiResult.Error("Network error: ${e.message}")
+            ApiResult.Error(sanitizeNetworkException(e))
         }
     }
 
-    suspend fun logout(): ApiResult<Boolean> = withContext(Dispatchers.IO) {
+    open suspend fun logout(): ApiResult<Boolean> = withContext(Dispatchers.IO) {
         val request = addAuthHeader(Request.Builder().url("${baseUrl()}/api/logout"))
             .post("{}".toRequestBody(JSON_MEDIA_TYPE))
             .build()
@@ -397,21 +568,117 @@ open class AsterApiClient @Inject constructor(
             ApiResult.Success(response.isSuccessful)
         } catch (e: Exception) {
             authStorage.clearAuthToken()
-            ApiResult.Error("Network error: ${e.message}")
+            ApiResult.Error(sanitizeNetworkException(e))
         }
     }
 
-    suspend fun deleteAccount(): ApiResult<Boolean> = withContext(Dispatchers.IO) {
+    suspend fun getMessageReads(conversationId: String): ApiResult<List<MessageReadDto>> = withContext(Dispatchers.IO) {
+        val request = addAuthHeader(Request.Builder().url("${baseUrl()}/api/messages/reads?conversationId=$conversationId"))
+            .get()
+            .build()
+        try {
+            val response = okHttpClient.newCall(request).execute()
+            if (!response.isSuccessful) {
+                return@withContext ApiResult.Error("Failed to fetch reads: ${response.code}", response.code)
+            }
+            val body = response.body?.string().orEmpty()
+            val json = JSONObject(body)
+            val readsArray = json.optJSONArray("reads") ?: JSONArray()
+            val list = mutableListOf<MessageReadDto>()
+            for (i in 0 until readsArray.length()) {
+                val r = readsArray.getJSONObject(i)
+                list.add(
+                    MessageReadDto(
+                        messageId = r.getString("message_id"),
+                        conversationId = r.getString("conversation_id"),
+                        readerUserId = r.getString("reader_user_id"),
+                        readAt = r.getLong("read_at")
+                    )
+                )
+            }
+            ApiResult.Success(list)
+        } catch (e: Exception) {
+            ApiResult.Error(sanitizeNetworkException(e))
+        }
+    }
+
+    suspend fun getUnsentMessages(conversationId: String): ApiResult<List<MessageUnsentDto>> = withContext(Dispatchers.IO) {
+        val request = addAuthHeader(Request.Builder().url("${baseUrl()}/api/messages/unsent?conversationId=$conversationId"))
+            .get()
+            .build()
+        try {
+            val response = okHttpClient.newCall(request).execute()
+            if (!response.isSuccessful) {
+                return@withContext ApiResult.Error("Failed to fetch unsent messages: ${response.code}", response.code)
+            }
+            val body = response.body?.string().orEmpty()
+            val json = JSONObject(body)
+            val unsentArray = json.optJSONArray("unsent") ?: JSONArray()
+            val list = mutableListOf<MessageUnsentDto>()
+            for (i in 0 until unsentArray.length()) {
+                val u = unsentArray.getJSONObject(i)
+                list.add(
+                    MessageUnsentDto(
+                        messageId = u.getString("message_id"),
+                        conversationId = u.getString("conversation_id"),
+                        senderId = u.getString("sender_user_id"),
+                        unsentAt = u.getLong("unsent_at")
+                    )
+                )
+            }
+            ApiResult.Success(list)
+        } catch (e: Exception) {
+            ApiResult.Error(sanitizeNetworkException(e))
+        }
+    }
+
+    suspend fun getPresence(userIds: List<String>): ApiResult<Map<String, UserSummary>> = withContext(Dispatchers.IO) {
+        val ids = userIds.joinToString(",")
+        val request = addAuthHeader(Request.Builder().url("${baseUrl()}/api/presence?userIds=$ids")).get().build()
+        try {
+            val response = okHttpClient.newCall(request).execute()
+            val bodyString = response.body?.string().orEmpty()
+            if (response.isSuccessful) {
+                val json = JSONObject(bodyString)
+                val presenceObj = json.optJSONObject("presence") ?: JSONObject()
+                val map = mutableMapOf<String, UserSummary>()
+                val keys = presenceObj.keys()
+                while (keys.hasNext()) {
+                    val k = keys.next()
+                    val p = presenceObj.getJSONObject(k)
+                    map[k] = UserSummary(
+                        userId = k,
+                        asterId = "",
+                        username = "",
+                        displayName = "",
+                        isOnline = p.optBoolean("isOnline", false),
+                        lastSeen = p.optLong("lastSeen", 0L),
+                        isDeleted = p.optBoolean("isDeleted", false)
+                    )
+                }
+                ApiResult.Success(map)
+            } else {
+                ApiResult.Error(parseErrorMessage(bodyString, "Presence fetch failed"), response.code)
+            }
+        } catch (e: Exception) {
+            ApiResult.Error(sanitizeNetworkException(e))
+        }
+    }
+
+    open suspend fun deleteAccount(): ApiResult<Boolean> = withContext(Dispatchers.IO) {
         val request = addAuthHeader(Request.Builder().url("${baseUrl()}/api/account/delete"))
             .post("{}".toRequestBody(JSON_MEDIA_TYPE))
             .build()
         try {
             val response = okHttpClient.newCall(request).execute()
-            authStorage.clearAuthToken()
-            ApiResult.Success(response.isSuccessful)
+            if (response.isSuccessful) {
+                authStorage.clearAuthToken()
+                ApiResult.Success(true)
+            } else {
+                ApiResult.Error("Failed to delete account: server returned ${response.code}")
+            }
         } catch (e: Exception) {
-            authStorage.clearAuthToken()
-            ApiResult.Error("Network error: ${e.message}")
+            ApiResult.Error(sanitizeNetworkException(e))
         }
     }
 
@@ -420,23 +687,9 @@ open class AsterApiClient @Inject constructor(
         for (i in 0 until array.length()) {
             val obj = array.getJSONObject(i)
             val senderObj = obj.optJSONObject("sender")
-            val senderSummary = senderObj?.let {
-                UserSummary(
-                    userId = it.getString("userId"),
-                    asterId = it.getString("asterId"),
-                    username = it.getString("username"),
-                    displayName = it.getString("displayName")
-                )
-            }
+            val senderSummary = senderObj?.let { parseUserSummary(it) }
             val recipientObj = obj.optJSONObject("recipient")
-            val recipientSummary = recipientObj?.let {
-                UserSummary(
-                    userId = it.getString("userId"),
-                    asterId = it.getString("asterId"),
-                    username = it.getString("username"),
-                    displayName = it.getString("displayName")
-                )
-            }
+            val recipientSummary = recipientObj?.let { parseUserSummary(it) }
             list.add(
                 FriendRequestSummary(
                     id = obj.getString("id"),
@@ -452,12 +705,17 @@ open class AsterApiClient @Inject constructor(
         return list
     }
 
+    private fun sanitizeNetworkException(e: Exception): String {
+        return NetworkSanitizer.sanitizeError(e)
+    }
+
     private fun parseErrorMessage(body: String, fallback: String): String {
         return try {
             val json = JSONObject(body)
-            json.optString("error", fallback)
+            val err = json.optString("error", fallback)
+            NetworkSanitizer.sanitizeMessage(err, fallback)
         } catch (_: Exception) {
-            if (body.isNotBlank() && body.length < 200) body else fallback
+            NetworkSanitizer.sanitizeMessage(body, fallback)
         }
     }
 }

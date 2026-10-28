@@ -15,7 +15,8 @@ enum class MessageStatus {
     SENT,
     DELIVERED,
     READ,
-    FAILED;
+    FAILED,
+    UNSENT;
 
     /**
      * Validates whether transitioning from this status to [newStatus] is permitted.
@@ -24,12 +25,14 @@ enum class MessageStatus {
      */
     fun canTransitionTo(newStatus: MessageStatus): Boolean {
         if (this == newStatus) return true
+        if (newStatus == UNSENT) return this != UNSENT
         return when (this) {
             SENDING -> newStatus == SENT || newStatus == FAILED
             SENT -> newStatus == DELIVERED || newStatus == READ
             DELIVERED -> newStatus == READ
             READ -> false // Terminal state
             FAILED -> newStatus == SENDING // Retry initiates new transmission
+            UNSENT -> false // Terminal state
         }
     }
 }

@@ -4,6 +4,7 @@ import com.aster.backend.database.AuthTokenRecord
 import com.aster.backend.database.MailboxDatabase
 import com.aster.backend.protocol.FriendRequestSummary
 import com.aster.backend.protocol.ProtocolLimits
+import com.aster.backend.protocol.ServerMessage
 import com.aster.backend.protocol.UserSummary
 import com.aster.backend.protocol.asterJson
 import com.aster.backend.relay.MessageRelay
@@ -433,14 +434,21 @@ fun Application.asterModule(
 
             try {
                 val req = mailboxDatabase.sendFriendRequest(tokenRecord.userId, target.userId)
+                val senderUser = mailboxDatabase.getUser(tokenRecord.userId)
+                val senderSummary = senderUser?.let { UserSummary(it.userId, it.asterId, it.username, it.displayName) }
+                val targetSummary = UserSummary(target.userId, target.asterId, target.username, target.displayName)
                 val summary = FriendRequestSummary(
                     id = req.id,
                     senderUserId = req.senderUserId,
                     recipientUserId = req.recipientUserId,
                     status = req.status,
-                    recipient = UserSummary(target.userId, target.asterId, target.username, target.displayName),
+                    sender = senderSummary,
+                    recipient = targetSummary,
                     createdAt = req.createdAt
                 )
+                // Real-time WebSocket push to recipient
+                relay.notifyUser(target.userId, ServerMessage.FriendRequestReceived(summary))
+
                 call.respondText(asterJson.encodeToString(FriendRequestSummary.serializer(), summary), ContentType.Application.Json, HttpStatusCode.Created)
             } catch (e: IllegalStateException) {
                 if (e.message?.contains("prohibited due to user block") == true) {
@@ -474,10 +482,22 @@ fun Application.asterModule(
                 return@post
             }
 
+            val reqRecord = mailboxDatabase.getFriendRequest(requestId)
             val updated = mailboxDatabase.respondFriendRequest(requestId, tokenRecord.userId, accept = (action == "ACCEPT"))
             if (!updated) {
                 call.respondText("""{"error":"Pending friend request not found"}""", ContentType.Application.Json, HttpStatusCode.NotFound)
                 return@post
+            }
+            if (reqRecord != null) {
+                val status = if (action == "ACCEPT") "ACCEPTED" else "REJECTED"
+                val event = ServerMessage.FriendRequestUpdated(
+                    requestId = requestId,
+                    status = status,
+                    senderUserId = reqRecord.senderUserId,
+                    recipientUserId = reqRecord.recipientUserId
+                )
+                relay.notifyUser(reqRecord.senderUserId, event)
+                relay.notifyUser(reqRecord.recipientUserId, event)
             }
             call.respondText("""{"status":"ok","requestId":"$requestId","action":"$action"}""", ContentType.Application.Json, HttpStatusCode.OK)
         }
@@ -501,10 +521,20 @@ fun Application.asterModule(
                 return@post
             }
 
+            val reqRecord = mailboxDatabase.getFriendRequest(requestId)
             val cancelled = mailboxDatabase.cancelFriendRequest(requestId, tokenRecord.userId)
             if (!cancelled) {
                 call.respondText("""{"error":"Pending friend request not found"}""", ContentType.Application.Json, HttpStatusCode.NotFound)
                 return@post
+            }
+            if (reqRecord != null) {
+                val event = ServerMessage.FriendRequestUpdated(
+                    requestId = requestId,
+                    status = "CANCELLED",
+                    senderUserId = reqRecord.senderUserId,
+                    recipientUserId = reqRecord.recipientUserId
+                )
+                relay.notifyUser(reqRecord.recipientUserId, event)
             }
             call.respondText("""{"status":"ok","requestId":"$requestId","action":"CANCELLED"}""", ContentType.Application.Json, HttpStatusCode.OK)
         }

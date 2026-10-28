@@ -4,7 +4,10 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.aster.app.data.network.ApiResult
 import com.aster.app.data.network.AsterApiClient
+import com.aster.app.data.network.AsterWebSocketClient
+import com.aster.app.data.network.ConnectionState
 import com.aster.app.data.network.FriendRequestSummary
+import com.aster.app.data.network.NetworkSanitizer
 import com.aster.app.data.network.UserSummary
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -20,6 +23,7 @@ data class ConnectionsUiState(
     val incomingRequests: List<FriendRequestSummary> = emptyList(),
     val outgoingRequests: List<FriendRequestSummary> = emptyList(),
     val blockedUsers: List<UserSummary> = emptyList(),
+    val connectionState: ConnectionState = ConnectionState.CONNECTED,
     val isLoading: Boolean = false,
     val isSearching: Boolean = false,
     val message: String? = null,
@@ -28,7 +32,10 @@ data class ConnectionsUiState(
 
 @HiltViewModel
 class ConnectionsViewModel @Inject constructor(
-    private val apiClient: AsterApiClient
+    private val apiClient: AsterApiClient,
+    private val userRepository: com.aster.app.domain.repository.UserRepository? = null,
+    private val conversationRepository: com.aster.app.domain.repository.ConversationRepository? = null,
+    private val webSocketClient: AsterWebSocketClient? = null
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(ConnectionsUiState())
@@ -36,6 +43,20 @@ class ConnectionsViewModel @Inject constructor(
 
     init {
         loadData()
+        webSocketClient?.let { ws ->
+            viewModelScope.launch {
+                ws.connectionState.collect { connState ->
+                    _uiState.value = _uiState.value.copy(connectionState = connState)
+                }
+            }
+        }
+        userRepository?.let { repo ->
+            viewModelScope.launch {
+                repo.getIncomingPendingRequests().collect { incoming ->
+                    _uiState.value = _uiState.value.copy(incomingRequests = incoming)
+                }
+            }
+        }
     }
 
     fun loadData() {
@@ -50,6 +71,24 @@ class ConnectionsViewModel @Inject constructor(
             val incoming = if (requestsRes is ApiResult.Success) requestsRes.data.incoming else emptyList()
             val outgoing = if (requestsRes is ApiResult.Success) requestsRes.data.outgoing else emptyList()
             val blocked = if (blockedRes is ApiResult.Success) blockedRes.data else emptyList()
+
+            // Sync confirmed friends into local Room database for seamless messaging and constellation views
+            if (userRepository != null && friends.isNotEmpty()) {
+                friends.forEach { friend ->
+                    userRepository.saveUser(
+                        com.aster.app.domain.model.User(
+                            id = friend.userId,
+                            username = friend.username,
+                            displayName = friend.displayName,
+                            isLocalUser = false,
+                            isOnline = friend.isOnline,
+                            lastSeen = friend.lastSeen,
+                            isDeleted = friend.isDeleted
+                        )
+                    )
+                }
+                userRepository.syncPresence(friends.map { it.userId })
+            }
 
             _uiState.value = _uiState.value.copy(
                 friends = friends,
@@ -102,17 +141,22 @@ class ConnectionsViewModel @Inject constructor(
     fun respondToRequest(requestId: String, accept: Boolean) {
         viewModelScope.launch {
             _uiState.value = _uiState.value.copy(isLoading = true, errorMessage = null)
-            when (val res = apiClient.respondFriendRequest(requestId, accept)) {
-                is ApiResult.Success -> {
-                    _uiState.value = _uiState.value.copy(
-                        message = if (accept) "Friend request accepted" else "Friend request declined",
-                        isLoading = false
-                    )
-                    loadData()
-                }
-                is ApiResult.Error -> {
-                    _uiState.value = _uiState.value.copy(errorMessage = res.message, isLoading = false)
-                }
+            val success = if (userRepository != null) {
+                userRepository.respondToFriendRequest(requestId, accept)
+            } else {
+                apiClient.respondFriendRequest(requestId, accept) is ApiResult.Success
+            }
+            if (success) {
+                _uiState.value = _uiState.value.copy(
+                    message = if (accept) "Friend request accepted" else "Friend request declined",
+                    isLoading = false
+                )
+                loadData()
+            } else {
+                _uiState.value = _uiState.value.copy(
+                    errorMessage = "Failed to respond to request",
+                    isLoading = false
+                )
             }
         }
     }
@@ -135,6 +179,7 @@ class ConnectionsViewModel @Inject constructor(
     fun blockUser(targetUserId: String) {
         viewModelScope.launch {
             _uiState.value = _uiState.value.copy(isLoading = true, errorMessage = null)
+            userRepository?.blockUser(targetUserId)
             when (val res = apiClient.blockUser(targetUserId = targetUserId)) {
                 is ApiResult.Success -> {
                     _uiState.value = _uiState.value.copy(message = "User blocked", isLoading = false)
@@ -150,9 +195,60 @@ class ConnectionsViewModel @Inject constructor(
     fun unblockUser(targetUserId: String) {
         viewModelScope.launch {
             _uiState.value = _uiState.value.copy(isLoading = true, errorMessage = null)
+            userRepository?.unblockUser(targetUserId)
             when (val res = apiClient.unblockUser(targetUserId)) {
                 is ApiResult.Success -> {
                     _uiState.value = _uiState.value.copy(message = "User unblocked", isLoading = false)
+                    loadData()
+                }
+                is ApiResult.Error -> {
+                    _uiState.value = _uiState.value.copy(errorMessage = res.message, isLoading = false)
+                }
+            }
+        }
+    }
+
+    fun startChat(friend: UserSummary, onNavigateToChat: (String) -> Unit) {
+        viewModelScope.launch {
+            try {
+                _uiState.value = _uiState.value.copy(isLoading = true, errorMessage = null)
+                userRepository?.saveUser(
+                    com.aster.app.domain.model.User(
+                        id = friend.userId,
+                        username = friend.username,
+                        displayName = friend.displayName,
+                        isLocalUser = false,
+                        isOnline = friend.isOnline,
+                        lastSeen = friend.lastSeen,
+                        isDeleted = friend.isDeleted
+                    )
+                )
+                if (conversationRepository != null) {
+                    val conversation = conversationRepository.getOrCreateDirectConversation(friend.userId)
+                    _uiState.value = _uiState.value.copy(isLoading = false)
+                    onNavigateToChat(conversation.id)
+                } else {
+                    val localUserId = userRepository?.getLocalUserOnce()?.id.orEmpty()
+                    val fallbackId = if (localUserId.isNotBlank()) {
+                        com.aster.app.domain.repository.getCanonicalDirectConversationId(localUserId, friend.userId)
+                    } else {
+                        "conv_${friend.userId}"
+                    }
+                    _uiState.value = _uiState.value.copy(isLoading = false)
+                    onNavigateToChat(fallbackId)
+                }
+            } catch (e: Exception) {
+                _uiState.value = _uiState.value.copy(isLoading = false, errorMessage = NetworkSanitizer.sanitizeError(e, "Failed to open chat"))
+            }
+        }
+    }
+
+    fun removeFriend(friendUserId: String) {
+        viewModelScope.launch {
+            _uiState.value = _uiState.value.copy(isLoading = true, errorMessage = null)
+            when (val res = apiClient.blockUser(targetUserId = friendUserId)) {
+                is ApiResult.Success -> {
+                    _uiState.value = _uiState.value.copy(message = "Contact removed", isLoading = false)
                     loadData()
                 }
                 is ApiResult.Error -> {

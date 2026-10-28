@@ -8,7 +8,11 @@ import com.aster.app.domain.model.User
 import com.aster.app.domain.repository.ConversationRepository
 import com.aster.app.domain.repository.UserRepository
 import dagger.hilt.android.lifecycle.HiltViewModel
+import com.aster.app.data.network.ApiResult
+import com.aster.app.data.network.AsterApiClient
 import com.aster.app.data.network.ConnectionState
+import com.aster.app.data.network.FriendRequestSummary
+import com.aster.app.data.network.NetworkSanitizer
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -24,7 +28,9 @@ data class HomeUiState(
     val isNewChatOpen: Boolean = false,
     val errorMessage: String? = null,
     val connectionState: ConnectionState = ConnectionState.DISCONNECTED,
-    val isLoading: Boolean = true
+    val isLoading: Boolean = true,
+    val viewMode: String = "CONSTELLATION",
+    val incomingFriendRequests: List<FriendRequestSummary> = emptyList()
 )
 
 @HiltViewModel
@@ -32,7 +38,9 @@ class HomeViewModel @Inject constructor(
     private val conversationRepository: ConversationRepository,
     private val userRepository: UserRepository,
     private val seedInitializer: DatabaseSeedInitializer,
-    private val webSocketClient: com.aster.app.data.network.AsterWebSocketClient
+    private val webSocketClient: com.aster.app.data.network.AsterWebSocketClient,
+    private val apiClient: AsterApiClient? = null,
+    private val authStorage: com.aster.app.data.auth.AsterAuthStorage = webSocketClient.authStorage
 ) : ViewModel() {
 
     private val _isNewChatOpen = MutableStateFlow(false)
@@ -63,8 +71,20 @@ class HomeViewModel @Inject constructor(
         userRepository.getUsers()
     ) { localUser, allUsers ->
         val localId = localUser?.id.orEmpty()
+        val effectiveLocalUser = if (localUser != null) {
+            val cleanName = com.aster.app.domain.model.sanitizeDisplayName(localUser.displayName, localUser.id)
+                ?: com.aster.app.domain.model.sanitizeDisplayName(webSocketClient.authStorage.getDisplayName(), localUser.id)
+                ?: ""
+            localUser.copy(displayName = cleanName)
+        } else {
+            val authId = webSocketClient.authStorage.getAuthenticatedUserId()
+            if (!authId.isNullOrBlank()) {
+                val cleanName = com.aster.app.domain.model.sanitizeDisplayName(webSocketClient.authStorage.getDisplayName(), authId) ?: ""
+                User(id = authId, username = authId.removePrefix("user_"), displayName = cleanName, isLocalUser = true)
+            } else null
+        }
         UserData(
-            localUser = localUser,
+            localUser = effectiveLocalUser,
             availableUsers = allUsers.filter { it.id != localId && !it.isLocalUser }
         )
     }
@@ -74,11 +94,17 @@ class HomeViewModel @Inject constructor(
     }
 
     val uiState: StateFlow<HomeUiState> = combine(
-        conversationRepository.getConversations(),
-        usersFlow,
-        webSocketClient.connectionState,
-        dialogFlow
-    ) { conversations, userData, connectionState, dialog ->
+        combine(
+            conversationRepository.getConversations(),
+            usersFlow,
+            webSocketClient.connectionState
+        ) { conversations, userData, connectionState ->
+            Triple(conversations, userData, connectionState)
+        },
+        dialogFlow,
+        authStorage.viewModeFlow,
+        userRepository.getIncomingPendingRequests()
+    ) { (conversations, userData, connectionState), dialog, viewMode, incomingRequests ->
         HomeUiState(
             conversations = conversations,
             localUser = userData.localUser,
@@ -86,17 +112,50 @@ class HomeViewModel @Inject constructor(
             isNewChatOpen = dialog.isOpen,
             errorMessage = dialog.error,
             connectionState = connectionState,
-            isLoading = false
+            isLoading = false,
+            viewMode = viewMode,
+            incomingFriendRequests = incomingRequests
         )
     }.stateIn(
         scope = viewModelScope,
         started = SharingStarted.WhileSubscribed(5000),
-        initialValue = HomeUiState()
+        initialValue = HomeUiState(viewMode = authStorage.getViewMode())
     )
+
+    fun respondToFriendRequest(requestId: String, accept: Boolean) {
+        viewModelScope.launch {
+            userRepository.respondToFriendRequest(requestId, accept)
+        }
+    }
 
     fun openNewChat() {
         _errorMessage.value = null
         _isNewChatOpen.value = true
+        if (apiClient != null) {
+            viewModelScope.launch {
+                try {
+                    when (val res = apiClient.getFriends()) {
+                        is ApiResult.Success -> {
+                            res.data.forEach { friend ->
+                                userRepository.saveUser(
+                                    com.aster.app.domain.model.User(
+                                        id = friend.userId,
+                                        username = friend.username,
+                                        displayName = friend.displayName,
+                                        isLocalUser = false,
+                                        isOnline = friend.isOnline,
+                                        lastSeen = friend.lastSeen,
+                                        isDeleted = friend.isDeleted
+                                    )
+                                )
+                            }
+                            userRepository.syncPresence(res.data.map { it.userId })
+                        }
+                        else -> {}
+                    }
+                } catch (_: Exception) {}
+            }
+        }
     }
 
     fun closeNewChat() {
@@ -112,7 +171,7 @@ class HomeViewModel @Inject constructor(
                 _isNewChatOpen.value = false
                 onNavigate(conversation.id)
             } catch (e: Exception) {
-                _errorMessage.value = e.message ?: "Failed to start conversation"
+                _errorMessage.value = NetworkSanitizer.sanitizeError(e, "Failed to start conversation")
             }
         }
     }
@@ -133,8 +192,52 @@ class HomeViewModel @Inject constructor(
                 _isNewChatOpen.value = false
                 onNavigate(conversation.id)
             } catch (e: Exception) {
-                _errorMessage.value = e.message ?: "Failed to create group"
+                _errorMessage.value = NetworkSanitizer.sanitizeError(e, "Failed to create group")
             }
+        }
+    }
+
+    fun toggleHighlight(conversationId: String, currentHighlighted: Boolean) {
+        viewModelScope.launch {
+            conversationRepository.setConstellationHighlight(conversationId, !currentHighlighted)
+        }
+    }
+
+    fun saveNodePosition(conversationId: String, normX: Float?, normY: Float?) {
+        viewModelScope.launch {
+            conversationRepository.setConstellationPosition(conversationId, normX, normY)
+        }
+    }
+
+    fun leaveGroup(groupId: String) {
+        viewModelScope.launch {
+            try {
+                conversationRepository.leaveGroup(groupId)
+            } catch (_: Exception) {}
+        }
+    }
+
+    fun blockUser(userId: String) {
+        viewModelScope.launch {
+            try {
+                userRepository.blockUser(userId)
+            } catch (_: Exception) {}
+        }
+    }
+
+    fun unblockUser(userId: String) {
+        viewModelScope.launch {
+            try {
+                userRepository.unblockUser(userId)
+            } catch (_: Exception) {}
+        }
+    }
+
+    fun removeContact(userId: String) {
+        viewModelScope.launch {
+            try {
+                apiClient?.blockUser(targetUserId = userId)
+            } catch (_: Exception) {}
         }
     }
 }

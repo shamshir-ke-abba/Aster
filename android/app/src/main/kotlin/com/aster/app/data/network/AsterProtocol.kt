@@ -1,5 +1,6 @@
 package com.aster.app.data.network
 
+import com.aster.app.data.local.entities.MessageEntity
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -31,7 +32,10 @@ data class UserSummary(
     val userId: String,
     val asterId: String,
     val username: String,
-    val displayName: String
+    val displayName: String,
+    val isOnline: Boolean = false,
+    val lastSeen: Long = 0L,
+    val isDeleted: Boolean = false
 )
 
 data class FriendRequestSummary(
@@ -82,7 +86,9 @@ sealed interface ClientMessage {
         val recipientId: String? = null,
         val body: String,
         val timestamp: Long,
-        val senderId: String? = null
+        val senderId: String? = null,
+        val replyToId: String? = null,
+        val effect: String? = null
     ) : ClientMessage {
         override fun toJson(): String = JSONObject().apply {
             put("type", "SEND_MESSAGE")
@@ -92,6 +98,8 @@ sealed interface ClientMessage {
             put("body", body)
             put("timestamp", timestamp)
             if (senderId != null) put("senderId", senderId)
+            if (replyToId != null) put("replyToId", replyToId)
+            if (effect != null) put("effect", effect)
         }.toString()
     }
 
@@ -197,6 +205,41 @@ sealed interface ClientMessage {
             put("newName", newName)
         }.toString()
     }
+
+    data class MarkRead(
+        val messageId: String,
+        val conversationId: String
+    ) : ClientMessage {
+        override fun toJson(): String = JSONObject().apply {
+            put("type", "MARK_READ")
+            put("messageId", messageId)
+            put("conversationId", conversationId)
+        }.toString()
+    }
+
+    data class UnsendMessage(
+        val messageId: String,
+        val conversationId: String
+    ) : ClientMessage {
+        override fun toJson(): String = JSONObject().apply {
+            put("type", "UNSEND_MESSAGE")
+            put("messageId", messageId)
+            put("conversationId", conversationId)
+        }.toString()
+    }
+
+    data class ToggleReaction(
+        val messageId: String,
+        val conversationId: String,
+        val emoji: String
+    ) : ClientMessage {
+        override fun toJson(): String = JSONObject().apply {
+            put("type", "TOGGLE_REACTION")
+            put("messageId", messageId)
+            put("conversationId", conversationId)
+            put("emoji", emoji)
+        }.toString()
+    }
 }
 
 sealed interface ServerMessage {
@@ -209,6 +252,19 @@ sealed interface ServerMessage {
         val conversationId: String,
         val senderId: String,
         val body: String,
+        val timestamp: Long,
+        val replyToId: String? = null,
+        val effect: String? = null,
+        val reactions: Map<String, List<String>> = emptyMap()
+    ) : ServerMessage
+
+    data class ReactionUpdate(
+        val messageId: String,
+        val conversationId: String,
+        val userId: String,
+        val emoji: String,
+        val action: String,
+        val reactions: Map<String, List<String>> = emptyMap(),
         val timestamp: Long
     ) : ServerMessage
     data class Error(val code: String, val message: String, val requestId: String? = null) : ServerMessage
@@ -242,6 +298,42 @@ sealed interface ServerMessage {
         val timestamp: Long
     ) : ServerMessage
 
+    data class MessageRead(
+        val messageId: String,
+        val conversationId: String,
+        val readerId: String,
+        val timestamp: Long
+    ) : ServerMessage
+
+    data class MessageUnsent(
+        val messageId: String,
+        val conversationId: String,
+        val senderId: String,
+        val timestamp: Long
+    ) : ServerMessage
+
+    data class PresenceUpdate(
+        val userId: String,
+        val isOnline: Boolean,
+        val lastSeen: Long,
+        val timestamp: Long = 0L
+    ) : ServerMessage
+
+    data class UserDeleted(
+        val userId: String
+    ) : ServerMessage
+
+    data class FriendRequestReceived(
+        val request: FriendRequestSummary
+    ) : ServerMessage
+
+    data class FriendRequestUpdated(
+        val requestId: String,
+        val status: String,
+        val senderUserId: String,
+        val recipientUserId: String
+    ) : ServerMessage
+
     companion object {
         fun fromJson(jsonStr: String): ServerMessage? {
             return try {
@@ -270,13 +362,45 @@ sealed interface ServerMessage {
                         val conversationId = json.optString("conversationId")
                         val senderId = json.optString("senderId")
                         val body = json.optString("body")
+                        val replyToId = if (json.has("replyToId") && !json.isNull("replyToId")) {
+                            json.optString("replyToId").takeIf { it.isNotBlank() }
+                        } else null
+                        val effect = if (json.has("effect") && !json.isNull("effect")) {
+                            json.optString("effect").takeIf { it.isNotBlank() }
+                        } else null
+                        val reactionsJson = json.optJSONObject("reactions")?.toString()
+                        val reactions = MessageEntity.parseReactions(reactionsJson)
                         if (messageId.isNotBlank() && conversationId.isNotBlank() && senderId.isNotBlank()) {
                             RelayMessage(
                                 messageId = messageId,
                                 conversationId = conversationId,
                                 senderId = senderId,
                                 body = body,
-                                timestamp = json.optLong("timestamp", System.currentTimeMillis())
+                                timestamp = json.optLong("timestamp", System.currentTimeMillis()),
+                                replyToId = replyToId,
+                                effect = effect,
+                                reactions = reactions
+                            )
+                        } else null
+                    }
+                    "REACTION_UPDATE" -> {
+                        val messageId = json.optString("messageId")
+                        val conversationId = json.optString("conversationId")
+                        val userId = json.optString("userId")
+                        val emoji = json.optString("emoji")
+                        val action = json.optString("action", "ADDED")
+                        val reactionsJson = json.optJSONObject("reactions")?.toString()
+                        val reactions = MessageEntity.parseReactions(reactionsJson)
+                        val timestamp = json.optLong("timestamp", System.currentTimeMillis())
+                        if (messageId.isNotBlank() && conversationId.isNotBlank() && emoji.isNotBlank()) {
+                            ReactionUpdate(
+                                messageId = messageId,
+                                conversationId = conversationId,
+                                userId = userId,
+                                emoji = emoji,
+                                action = action,
+                                reactions = reactions,
+                                timestamp = timestamp
                             )
                         } else null
                     }
@@ -340,6 +464,77 @@ sealed interface ServerMessage {
                         val nm = if (json.has("name")) json.optString("name") else null
                         val ts = json.optLong("timestamp", System.currentTimeMillis())
                         GroupEvent(grpId, evtType, actor, target, nm, ts)
+                    }
+                    "MESSAGE_READ" -> {
+                        val messageId = json.optString("messageId")
+                        val conversationId = json.optString("conversationId")
+                        val readerId = json.optString("readerId")
+                        val timestamp = json.optLong("timestamp", System.currentTimeMillis())
+                        if (messageId.isNotBlank() && conversationId.isNotBlank() && readerId.isNotBlank()) {
+                            MessageRead(messageId, conversationId, readerId, timestamp)
+                        } else null
+                    }
+                    "MESSAGE_UNSENT" -> {
+                        val messageId = json.optString("messageId")
+                        val conversationId = json.optString("conversationId")
+                        val senderId = json.optString("senderId")
+                        val timestamp = json.optLong("timestamp", System.currentTimeMillis())
+                        if (messageId.isNotBlank() && conversationId.isNotBlank()) {
+                            MessageUnsent(messageId, conversationId, senderId, timestamp)
+                        } else null
+                    }
+                    "PRESENCE_UPDATE" -> {
+                        val uid = json.optString("userId")
+                        val isOnline = json.optBoolean("isOnline", false)
+                        val lastSeen = json.optLong("lastSeen", 0L)
+                        val timestamp = json.optLong("timestamp", System.currentTimeMillis())
+                        if (uid.isNotBlank()) PresenceUpdate(uid, isOnline, lastSeen, timestamp) else null
+                    }
+                    "USER_DELETED" -> {
+                        val uid = json.optString("userId")
+                        if (uid.isNotBlank()) UserDeleted(uid) else null
+                    }
+                    "FRIEND_REQUEST_RECEIVED" -> {
+                        val reqObj = json.optJSONObject("request")
+                        if (reqObj != null) {
+                            val senderObj = reqObj.optJSONObject("sender")
+                            val senderSummary = senderObj?.let {
+                                UserSummary(
+                                    userId = it.optString("userId"),
+                                    asterId = it.optString("asterId"),
+                                    username = it.optString("username"),
+                                    displayName = it.optString("displayName")
+                                )
+                            }
+                            val recipientObj = reqObj.optJSONObject("recipient")
+                            val recipientSummary = recipientObj?.let {
+                                UserSummary(
+                                    userId = it.optString("userId"),
+                                    asterId = it.optString("asterId"),
+                                    username = it.optString("username"),
+                                    displayName = it.optString("displayName")
+                                )
+                            }
+                            val summary = FriendRequestSummary(
+                                id = reqObj.optString("id"),
+                                senderUserId = reqObj.optString("senderUserId"),
+                                recipientUserId = reqObj.optString("recipientUserId"),
+                                status = reqObj.optString("status", "PENDING"),
+                                sender = senderSummary,
+                                recipient = recipientSummary,
+                                createdAt = reqObj.optLong("createdAt", System.currentTimeMillis())
+                            )
+                            FriendRequestReceived(summary)
+                        } else null
+                    }
+                    "FRIEND_REQUEST_UPDATED" -> {
+                        val reqId = json.optString("requestId")
+                        val st = json.optString("status")
+                        val sender = json.optString("senderUserId")
+                        val recipient = json.optString("recipientUserId")
+                        if (reqId.isNotBlank() && st.isNotBlank()) {
+                            FriendRequestUpdated(reqId, st, sender, recipient)
+                        } else null
                     }
                     else -> null
                 }

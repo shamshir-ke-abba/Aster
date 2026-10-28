@@ -78,6 +78,31 @@ class DomainModelTest {
         assertFalse(conversation.isGroup)
         assertEquals(2, conversation.unreadCount)
         assertEquals(contact, conversation.otherMember)
+        assertTrue(conversation.members.isEmpty())
+    }
+
+    @Test
+    fun groupConversationModel_propertiesAndMemberCluster() {
+        val now = System.currentTimeMillis()
+        val member1 = User("user_alex", "alex", "Alex Mercer", isLocalUser = false, isOnline = true)
+        val member2 = User("user_rohan", "rohan", "Rohan", isLocalUser = false, isOnline = false)
+        val groupConversation = Conversation(
+            id = "group_celestial",
+            title = "Celestial Circle",
+            isGroup = true,
+            createdAt = now,
+            unreadCount = 1,
+            members = listOf(member1, member2)
+        )
+
+        assertEquals("group_celestial", groupConversation.id)
+        assertEquals("Celestial Circle", groupConversation.title)
+        assertTrue(groupConversation.isGroup)
+        assertEquals(1, groupConversation.unreadCount)
+        assertNull(groupConversation.otherMember)
+        assertEquals(2, groupConversation.members.size)
+        assertEquals("Alex Mercer", groupConversation.members[0].displayName)
+        assertEquals("Rohan", groupConversation.members[1].displayName)
     }
 
     @Test

@@ -19,5 +19,9 @@ data class Message(
     val body: String,
     val createdAt: Long,
     val status: MessageStatus = MessageStatus.SENDING,
-    val replyToId: String? = null
+    val replyToId: String? = null,
+    val readBy: Set<String> = emptySet(),
+    val reactions: Map<String, List<String>> = emptyMap(),
+    val effect: String? = null,
+    val isEffectPlayed: Boolean = false
 )

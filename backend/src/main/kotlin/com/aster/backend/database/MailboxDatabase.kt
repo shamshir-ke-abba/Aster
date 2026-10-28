@@ -1625,6 +1625,32 @@ class MailboxDatabase(
         }
     }
 
+    suspend fun getFriendRequest(requestId: String): FriendRequestRecord? = withContext(Dispatchers.IO) {
+        synchronized(lock) {
+            connection.prepareStatement(
+                """
+                SELECT id, sender_user_id, recipient_user_id, status, created_at, updated_at
+                FROM friend_requests
+                WHERE id = ?
+                """.trimIndent()
+            ).use { ps ->
+                ps.setString(1, requestId)
+                ps.executeQuery().use { rs ->
+                    if (rs.next()) {
+                        FriendRequestRecord(
+                            id = rs.getString("id"),
+                            senderUserId = rs.getString("sender_user_id"),
+                            recipientUserId = rs.getString("recipient_user_id"),
+                            status = rs.getString("status"),
+                            createdAt = rs.getLong("created_at"),
+                            updatedAt = rs.getLong("updated_at")
+                        )
+                    } else null
+                }
+            }
+        }
+    }
+
     suspend fun getIncomingFriendRequests(userId: String): List<FriendRequestRecord> = withContext(Dispatchers.IO) {
         synchronized(lock) {
             connection.prepareStatement(

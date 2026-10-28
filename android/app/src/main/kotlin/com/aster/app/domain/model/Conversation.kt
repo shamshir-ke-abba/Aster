@@ -10,6 +10,7 @@ package com.aster.app.domain.model
  * @property lastMessage Most recent message for conversation preview in the list.
  * @property unreadCount Number of unread incoming messages in this conversation.
  * @property otherMember For 1:1 direct messages, the other participant in the conversation.
+ * @property members All participants in the conversation (useful for group constellations).
  */
 data class Conversation(
     val id: String,
@@ -18,5 +19,11 @@ data class Conversation(
     val createdAt: Long,
     val lastMessage: Message? = null,
     val unreadCount: Int = 0,
-    val otherMember: User? = null
-)
+    val otherMember: User? = null,
+    val members: List<User> = emptyList(),
+    val isHighlighted: Boolean = false,
+    val customNormalizedX: Float? = null,
+    val customNormalizedY: Float? = null
+) {
+    val isBlocked: Boolean get() = !isGroup && otherMember?.isBlocked == true
+}

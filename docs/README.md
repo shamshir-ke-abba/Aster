@@ -39,13 +39,14 @@ Aster is the space connecting them.
 
 ## Current Status
 
-- Android foundation established and verified (Kotlin 2.0.21, AGP 8.7.3, Compose BOM 2024.10.01, Hilt, Room 2.6.1).
-- Local-first messaging vertical slice implemented: Room database persistence, Conversation list, Chat screen, message creation and local delivery state transitions.
-- Realtime WebSocket relay backend implemented (Ktor CIO, ₹0 cost) and verified end-to-end with two-client messaging, server ACKs, offline queueing, and automatic reconnection.
+- **Phase 1 — Core Messaging Foundation** is `COMPLETE` and verified across separate physical networks (Waydroid on Wi-Fi and Samsung Galaxy M21 on Airtel 4G/LTE cellular with Wi-Fi disabled).
+- Android client (Kotlin, Jetpack Compose, Room, Hilt, AndroidKeyStore) fully integrated with the production Cloudflare Workers + Durable Objects (`AsterRelayDO`, `GroupDO`) + D1 SQLite backend.
+- Registration, permanent Aster IDs, user discovery, friend requests, 1:1 conversations, bidirectional real-time messaging, durable offline mailboxes, recipient ACKs, and Room cold-start persistence are operational.
+- Automated tests: 85/85 Android unit and repository tests passing. Real two-client production playtest: **PASS**.
 
 Next major milestone:
 
-**Phase 2 — Group messaging & multi-user constellations.**
+**Phase 2 — Product Completeness (Profile & Settings, Contact Management, Conversation UX polish).**
 
 ## Design
 

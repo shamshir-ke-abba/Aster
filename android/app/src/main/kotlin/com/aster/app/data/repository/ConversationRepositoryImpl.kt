@@ -1,6 +1,7 @@
 package com.aster.app.data.repository
 
 import android.util.Log
+import com.aster.app.data.local.dao.ConstellationNodePrefDao
 import com.aster.app.data.local.dao.ConversationDao
 import com.aster.app.data.local.dao.ConversationMemberDao
 import com.aster.app.data.local.dao.MessageDao
@@ -13,6 +14,7 @@ import com.aster.app.data.network.ConnectionState
 import com.aster.app.domain.model.Conversation
 import com.aster.app.domain.model.User
 import com.aster.app.domain.repository.ConversationRepository
+import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -38,11 +40,13 @@ class ConversationRepositoryImpl @Inject constructor(
     private val conversationMemberDao: ConversationMemberDao,
     private val messageDao: MessageDao,
     private val userDao: UserDao,
-    private val webSocketClient: AsterWebSocketClient
+    private val webSocketClient: AsterWebSocketClient,
+    private val constellationNodePrefDao: ConstellationNodePrefDao? = null,
+    private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO
 ) : ConversationRepository {
 
     private val TAG = "ConversationRepo"
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val scope = CoroutineScope(SupervisorJob() + ioDispatcher)
     private val mutex = Mutex()
 
     init {
@@ -99,6 +103,19 @@ class ConversationRepositoryImpl @Inject constructor(
             webSocketClient.groupMembersLists.collect { membersList ->
                 Log.d(TAG, "Syncing ${membersList.members.size} members for group ${membersList.groupId}")
                 val currentAuthUserId = webSocketClient.authStorage.getAuthenticatedUserId()
+                val currentMemberIds = membersList.members.map { it.userId }.toSet()
+
+                // Prune members locally who were removed on server
+                val localMembers = conversationMemberDao.getMembersForConversationOnce(membersList.groupId)
+                for (existing in localMembers) {
+                    if (existing.id !in currentMemberIds) {
+                        conversationMemberDao.removeMember(membersList.groupId, existing.id)
+                    }
+                }
+                if (currentAuthUserId != null && currentAuthUserId !in currentMemberIds) {
+                    conversationDao.deleteConversation(membersList.groupId)
+                }
+
                 for (m in membersList.members) {
                     if (userDao.getUserByIdOnce(m.userId) == null) {
                         val dName = m.userId.removePrefix("user_").replaceFirstChar { it.uppercase() }
@@ -108,7 +125,7 @@ class ConversationRepositoryImpl @Inject constructor(
                                 username = m.userId.removePrefix("user_"),
                                 displayName = dName,
                                 isLocalUser = (m.userId == currentAuthUserId),
-                                isOnline = true
+                                isOnline = (m.userId == currentAuthUserId)
                             )
                         )
                     }
@@ -148,7 +165,7 @@ class ConversationRepositoryImpl @Inject constructor(
                                         username = uid.removePrefix("user_"),
                                         displayName = dName,
                                         isLocalUser = (uid == currentAuthUserId),
-                                        isOnline = true
+                                        isOnline = (uid == currentAuthUserId)
                                     )
                                 )
                             }
@@ -165,6 +182,10 @@ class ConversationRepositoryImpl @Inject constructor(
                     "MEMBER_REMOVED", "MEMBER_LEFT" -> {
                         val target = event.targetUserId ?: event.actorId
                         conversationMemberDao.removeMember(event.groupId, target)
+                        val currentAuthUserId = webSocketClient.authStorage.getAuthenticatedUserId()
+                        if (target == currentAuthUserId) {
+                            conversationDao.deleteConversation(event.groupId)
+                        }
                     }
                 }
             }
@@ -172,21 +193,28 @@ class ConversationRepositoryImpl @Inject constructor(
     }
 
     override fun getConversations(): Flow<List<Conversation>> {
+        val prefsFlow = constellationNodePrefDao?.getAllNodePrefs() ?: flowOf(emptyList())
         return userDao.getLocalUser().flatMapLatest { localUserEntity ->
             val localUserId = localUserEntity?.id.orEmpty()
             if (localUserId.isBlank()) {
                 flowOf(emptyList())
             } else {
-                conversationDao.getConversationsForUser(localUserId).flatMapLatest { conversationEntities ->
+                combine(
+                    conversationDao.getConversationsForUser(localUserId),
+                    prefsFlow
+                ) { conversationEntities, prefs ->
+                    val prefMap = prefs.associateBy { it.conversationId }
                     if (conversationEntities.isEmpty()) {
                         flowOf(emptyList())
                     } else {
                         val flows = conversationEntities.map { convEntity ->
+                            val pref = prefMap[convEntity.id]
                             combine(
                                 messageDao.getLatestMessage(convEntity.id),
                                 messageDao.getUnreadCount(convEntity.id, localUserId),
-                                conversationMemberDao.getOtherMember(convEntity.id, localUserId)
-                            ) { latestMsg, unreadCount, otherMemberEntity ->
+                                conversationMemberDao.getOtherMember(convEntity.id, localUserId),
+                                conversationMemberDao.getMembersForConversation(convEntity.id)
+                            ) { latestMsg, unreadCount, otherMemberEntity, memberEntities ->
                                 Conversation(
                                     id = convEntity.id,
                                     title = if (!convEntity.isGroup && otherMemberEntity != null) {
@@ -198,25 +226,32 @@ class ConversationRepositoryImpl @Inject constructor(
                                     createdAt = convEntity.createdAt,
                                     lastMessage = latestMsg?.toDomain(),
                                     unreadCount = unreadCount,
-                                    otherMember = otherMemberEntity?.toDomain()
+                                    otherMember = otherMemberEntity?.toDomain(),
+                                    members = memberEntities.map { it.toDomain() },
+                                    isHighlighted = pref?.isHighlighted ?: false,
+                                    customNormalizedX = pref?.customNormalizedX,
+                                    customNormalizedY = pref?.customNormalizedY
                                 )
                             }
                         }
                         combine(flows) { it.toList() }
                     }
-                }
+                }.flatMapLatest { it }
             }
         }
     }
 
     override fun getConversation(conversationId: String): Flow<Conversation?> {
+        val prefFlow = constellationNodePrefDao?.getNodePrefFlow(conversationId) ?: flowOf(null)
         return userDao.getLocalUser().flatMapLatest { localUserEntity ->
             val localUserId = localUserEntity?.id.orEmpty()
             combine(
                 conversationDao.getConversationById(conversationId),
                 messageDao.getLatestMessage(conversationId),
-                conversationMemberDao.getOtherMember(conversationId, localUserId)
-            ) { convEntity, latestMsg, otherMemberEntity ->
+                conversationMemberDao.getOtherMember(conversationId, localUserId),
+                conversationMemberDao.getMembersForConversation(conversationId),
+                prefFlow
+            ) { convEntity, latestMsg, otherMemberEntity, memberEntities, pref ->
                 convEntity?.let {
                     Conversation(
                         id = it.id,
@@ -229,7 +264,11 @@ class ConversationRepositoryImpl @Inject constructor(
                         createdAt = it.createdAt,
                         lastMessage = latestMsg?.toDomain(),
                         unreadCount = 0,
-                        otherMember = otherMemberEntity?.toDomain()
+                        otherMember = otherMemberEntity?.toDomain(),
+                        members = memberEntities.map { memberEntity -> memberEntity.toDomain() },
+                        isHighlighted = pref?.isHighlighted ?: false,
+                        customNormalizedX = pref?.customNormalizedX,
+                        customNormalizedY = pref?.customNormalizedY
                     )
                 }
             }
@@ -239,6 +278,12 @@ class ConversationRepositoryImpl @Inject constructor(
     override fun getConversationMembers(conversationId: String): Flow<List<User>> {
         return conversationMemberDao.getMembersForConversation(conversationId).map { entities ->
             entities.map { it.toDomain() }
+        }
+    }
+
+    override fun getConversationMemberRoles(conversationId: String): Flow<Map<String, String>> {
+        return conversationMemberDao.getMemberEntitiesForConversation(conversationId).map { entities ->
+            entities.associate { it.userId to it.role }
         }
     }
 
@@ -270,7 +315,11 @@ class ConversationRepositoryImpl @Inject constructor(
     override suspend fun markConversationAsRead(conversationId: String) {
         val localUser = userDao.getLocalUserOnce()
         val localUserId = localUser?.id.orEmpty()
+        val unreadIncoming = messageDao.getUnreadIncomingMessages(conversationId, localUserId)
         messageDao.markMessagesAsRead(conversationId, localUserId)
+        for (msg in unreadIncoming) {
+            webSocketClient.sendMarkRead(msg.id, conversationId)
+        }
     }
 
     override suspend fun getOrCreateDirectConversation(otherUserId: String): Conversation = mutex.withLock {
@@ -296,8 +345,7 @@ class ConversationRepositoryImpl @Inject constructor(
         }
 
         // 2. Generate deterministic ID for the pair
-        val sortedPair = listOf(localUser.id, otherUserId).sorted()
-        val convId = "conv_${sortedPair[0]}_${sortedPair[1]}"
+        val convId = com.aster.app.domain.repository.getCanonicalDirectConversationId(localUser.id, otherUserId)
 
         val existingById = conversationDao.getConversationByIdOnce(convId)
         if (existingById != null) {
@@ -387,7 +435,7 @@ class ConversationRepositoryImpl @Inject constructor(
                         username = uid.removePrefix("user_"),
                         displayName = dName,
                         isLocalUser = (uid == localUser.id),
-                        isOnline = true
+                        isOnline = (uid == localUser.id)
                     )
                 )
             }
@@ -426,7 +474,7 @@ class ConversationRepositoryImpl @Inject constructor(
                     username = userId.removePrefix("user_"),
                     displayName = dName,
                     isLocalUser = false,
-                    isOnline = true
+                    isOnline = false
                 )
             )
         }
@@ -456,5 +504,43 @@ class ConversationRepositoryImpl @Inject constructor(
     override suspend fun renameGroup(groupId: String, newName: String) {
         webSocketClient.renameGroup(groupId, newName)
         conversationDao.updateConversationTitle(groupId, newName)
+    }
+
+    override fun getNodePrefs(): Flow<List<com.aster.app.data.local.entities.ConstellationNodePrefEntity>> {
+        return constellationNodePrefDao?.getAllNodePrefs() ?: flowOf(emptyList())
+    }
+
+    override suspend fun setConstellationHighlight(conversationId: String, isHighlighted: Boolean) {
+        val dao = constellationNodePrefDao ?: return
+        val existing = dao.getNodePref(conversationId)
+        if (existing != null) {
+            dao.upsertNodePref(existing.copy(isHighlighted = isHighlighted, updatedAt = System.currentTimeMillis()))
+        } else {
+            dao.upsertNodePref(
+                com.aster.app.data.local.entities.ConstellationNodePrefEntity(
+                    conversationId = conversationId,
+                    customNormalizedX = null,
+                    customNormalizedY = null,
+                    isHighlighted = isHighlighted
+                )
+            )
+        }
+    }
+
+    override suspend fun setConstellationPosition(conversationId: String, normalizedX: Float?, normalizedY: Float?) {
+        val dao = constellationNodePrefDao ?: return
+        val existing = dao.getNodePref(conversationId)
+        if (existing != null) {
+            dao.upsertNodePref(existing.copy(customNormalizedX = normalizedX, customNormalizedY = normalizedY, updatedAt = System.currentTimeMillis()))
+        } else {
+            dao.upsertNodePref(
+                com.aster.app.data.local.entities.ConstellationNodePrefEntity(
+                    conversationId = conversationId,
+                    customNormalizedX = normalizedX,
+                    customNormalizedY = normalizedY,
+                    isHighlighted = false
+                )
+            )
+        }
     }
 }

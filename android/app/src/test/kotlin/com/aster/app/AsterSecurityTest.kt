@@ -100,6 +100,26 @@ class AsterSecurityTest {
     }
 
     @Test
+    fun productionCloudflareEndpointConfiguredAndValidated() {
+        NetworkConfig.setServerUrlForEnvironment(
+            NetworkConfig.ENDPOINT_CLOUDFLARE_PRODUCTION_TLS,
+            NetworkEnvironment.PRODUCTION
+        )
+        assertEquals(
+            "wss://aster-backend-cloudflare.kmsaadbinafzal.workers.dev/ws",
+            NetworkConfig.serverUrl
+        )
+        assertEquals(
+            "https://aster-backend-cloudflare.kmsaadbinafzal.workers.dev",
+            NetworkConfig.getHttpBaseUrl()
+        )
+        assertEquals(
+            NetworkConfig.ENDPOINT_CLOUDFLARE_PRODUCTION_TLS,
+            NetworkConfig.defaultEndpointForDevice(NetworkEnvironment.PRODUCTION)
+        )
+    }
+
+    @Test
     fun productionRejectsUrlWithUserCredentials() {
         try {
             NetworkConfig.serverUrl = "wss://user:pass@192.168.0.159:8443/ws"

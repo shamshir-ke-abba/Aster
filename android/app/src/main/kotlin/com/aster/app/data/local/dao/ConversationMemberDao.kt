@@ -11,10 +11,18 @@ import kotlinx.coroutines.flow.Flow
 @Dao
 interface ConversationMemberDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
-    suspend fun insertMember(member: ConversationMemberEntity)
+    suspend fun insertMember(member: ConversationMemberEntity): Long
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
-    suspend fun insertMembers(members: List<ConversationMemberEntity>)
+    suspend fun insertMembers(members: List<ConversationMemberEntity>): List<Long>
+
+    @Query(
+        """
+        SELECT * FROM conversation_members
+        WHERE conversation_id = :conversationId
+        """
+    )
+    fun getMemberEntitiesForConversation(conversationId: String): Flow<List<ConversationMemberEntity>>
 
     @Query(
         """

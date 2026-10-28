@@ -23,16 +23,24 @@ class AsterApplication : Application() {
     @Inject
     lateinit var authStorage: com.aster.app.data.auth.AsterAuthStorage
 
+    @Inject
+    lateinit var webSocketClient: com.aster.app.data.network.AsterWebSocketClient
+
     override fun onCreate() {
         super.onCreate()
         val savedServer = authStorage.getServerUrl()
-        if (!savedServer.isNullOrBlank()) {
-            try {
-                com.aster.app.data.network.NetworkConfig.serverUrl = savedServer
-            } catch (e: Exception) {
-                // Ignore if invalid
+        com.aster.app.data.network.NetworkConfig.initializeEndpoint(
+            savedUrl = savedServer,
+            env = com.aster.app.data.network.NetworkConfig.currentEnvironment,
+            onStaleEndpointCleared = {
+                authStorage.clearServerUrl()
             }
-        }
+        )
         notificationManager.initChannels()
+
+        if (authStorage.isProvisioned()) {
+            webSocketClient.connect()
+            com.aster.app.service.AsterSyncService.start(this)
+        }
     }
 }

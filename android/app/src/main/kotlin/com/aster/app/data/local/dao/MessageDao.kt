@@ -29,6 +29,21 @@ interface MessageDao {
     @Query("UPDATE messages SET status = :status WHERE id = :messageId AND status = :currentStatus")
     suspend fun updateMessageStatusIfCurrent(messageId: String, currentStatus: MessageStatus, status: MessageStatus): Int
 
+    @Query("UPDATE messages SET status = 'UNSENT', body = 'This message was unsent' WHERE id = :messageId")
+    suspend fun markMessageAsUnsent(messageId: String)
+
+    @Query("UPDATE messages SET reactions = :reactionsJson WHERE id = :messageId")
+    suspend fun updateMessageReactions(messageId: String, reactionsJson: String)
+
+    @Query("UPDATE messages SET effect = :effect WHERE id = :messageId")
+    suspend fun updateMessageEffect(messageId: String, effect: String?)
+
+    @Query("UPDATE messages SET is_effect_played = 1 WHERE id = :messageId")
+    suspend fun markEffectPlayed(messageId: String)
+
+    @Query("DELETE FROM messages WHERE id = :messageId")
+    suspend fun deleteMessageById(messageId: String)
+
     @Query("SELECT * FROM messages WHERE id = :messageId LIMIT 1")
     suspend fun getMessageById(messageId: String): MessageEntity?
 
@@ -53,6 +68,17 @@ interface MessageDao {
 
     @Query(
         """
+        SELECT * FROM messages 
+        WHERE conversation_id = :conversationId 
+        AND sender_id != :localUserId 
+        AND status != 'READ'
+        ORDER BY created_at ASC
+        """
+    )
+    suspend fun getUnreadIncomingMessages(conversationId: String, localUserId: String): List<MessageEntity>
+
+    @Query(
+        """
         UPDATE messages 
         SET status = 'READ' 
         WHERE conversation_id = :conversationId 
@@ -64,4 +90,7 @@ interface MessageDao {
 
     @Query("SELECT * FROM messages WHERE sender_id = :localUserId AND status = 'SENDING' ORDER BY created_at ASC, id ASC")
     suspend fun getPendingMessages(localUserId: String): List<MessageEntity>
+
+    @Query("SELECT * FROM messages WHERE status = 'SENDING' ORDER BY created_at ASC, id ASC")
+    suspend fun getAllPendingMessages(): List<MessageEntity>
 }

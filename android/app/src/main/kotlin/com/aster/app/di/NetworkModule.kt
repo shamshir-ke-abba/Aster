@@ -37,9 +37,10 @@ object NetworkModule {
     @Singleton
     fun provideAsterWebSocketClient(
         okHttpClient: OkHttpClient,
-        authStorage: com.aster.app.data.auth.AsterAuthStorage
+        authStorage: com.aster.app.data.auth.AsterAuthStorage,
+        @ApplicationContext context: Context
     ): AsterWebSocketClient {
-        return AsterWebSocketClient(okHttpClient, authStorage)
+        return AsterWebSocketClient(okHttpClient, authStorage, context)
     }
 
     @Provides
@@ -49,5 +50,10 @@ object NetworkModule {
         authStorage: com.aster.app.data.auth.AsterAuthStorage
     ): com.aster.app.data.network.AsterApiClient {
         return com.aster.app.data.network.AsterApiClient(okHttpClient, authStorage)
+    }
+
+    @Provides
+    fun provideCoroutineDispatcher(): kotlinx.coroutines.CoroutineDispatcher {
+        return kotlinx.coroutines.Dispatchers.IO
     }
 }

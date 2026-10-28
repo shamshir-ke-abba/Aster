@@ -1,0 +1,24 @@
+{
+  "name": "aster-backend-cloudflare",
+  "main": "src/index.ts",
+  "compatibility_date": "2024-10-11",
+  "compatibility_flags": ["nodejs_compat"],
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "ASTER_RELAY_DO",
+        "class_name": "AsterRelayDO"
+      },
+      {
+        "name": "GROUP_DO",
+        "class_name": "GroupDO"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["AsterRelayDO", "GroupDO"]
+    }
+  ]
+}

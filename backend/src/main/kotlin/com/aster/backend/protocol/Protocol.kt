@@ -258,4 +258,19 @@ sealed interface ServerMessage {
         val name: String? = null,
         val timestamp: Long
     ) : ServerMessage
+
+    @Serializable
+    @SerialName("FRIEND_REQUEST_RECEIVED")
+    data class FriendRequestReceived(
+        val request: FriendRequestSummary
+    ) : ServerMessage
+
+    @Serializable
+    @SerialName("FRIEND_REQUEST_UPDATED")
+    data class FriendRequestUpdated(
+        val requestId: String,
+        val status: String,
+        val senderUserId: String,
+        val recipientUserId: String
+    ) : ServerMessage
 }

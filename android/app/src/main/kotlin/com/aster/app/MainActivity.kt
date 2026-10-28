@@ -37,9 +37,7 @@ class MainActivity : ComponentActivity() {
     @Inject
     lateinit var messageRepository: com.aster.app.domain.repository.MessageRepository
 
-    private val pendingConversationId = MutableStateFlow<String?>(null)
-    private val pendingInviteToken = MutableStateFlow<String?>(null)
-    private val pendingInviteError = MutableStateFlow<String?>(null)
+    internal val pendingConversationId = MutableStateFlow<String?>(null)
 
     private val requestNotificationPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestPermission()
@@ -55,11 +53,12 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         notificationManager.initChannels()
         checkNotificationPermission()
-        handleInviteIntent(intent)
+        handleServerOverrideIntent(intent)
         handleNotificationIntent(intent)
 
         if (authStorage.isProvisioned()) {
             webSocketClient.connect()
+            com.aster.app.service.AsterSyncService.start(this)
         }
 
         enableEdgeToEdge()
@@ -68,9 +67,7 @@ class MainActivity : ComponentActivity() {
                 AsterNavHost(
                     modifier = Modifier.fillMaxSize(),
                     isProvisioned = authStorage.isProvisioned(),
-                    pendingConversationId = pendingConversationId,
-                    pendingInviteToken = pendingInviteToken,
-                    pendingInviteError = pendingInviteError
+                    pendingConversationId = pendingConversationId
                 )
             }
         }
@@ -81,14 +78,60 @@ class MainActivity : ComponentActivity() {
         notificationManager.isAppForeground = true
     }
 
+    override fun onResume() {
+        super.onResume()
+        notificationManager.isAppForeground = true
+        notificationManager.getActiveConversation()?.let { activeId ->
+            notificationManager.dismissNotification(activeId)
+        }
+        if (authStorage.isProvisioned() &&
+            webSocketClient.connectionState.value == com.aster.app.data.network.ConnectionState.DISCONNECTED &&
+            webSocketClient.isNetworkAvailable()
+        ) {
+            Log.i("MainActivity", "[AsterLifecycle] Resumed with network available; re-asserting active connection")
+            webSocketClient.connect()
+        }
+    }
+
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        Log.d("MainActivity", "onWindowFocusChanged: hasFocus=$hasFocus")
+        if (hasFocus) {
+            notificationManager.isAppForeground = true
+            notificationManager.getActiveConversation()?.let { activeId ->
+                notificationManager.dismissNotification(activeId)
+            }
+        } else {
+            notificationManager.isAppForeground = false
+        }
+    }
+
+    override fun onTopResumedActivityChanged(isTopResumedActivity: Boolean) {
+        super.onTopResumedActivityChanged(isTopResumedActivity)
+        Log.d("MainActivity", "onTopResumedActivityChanged: isTopResumedActivity=$isTopResumedActivity")
+        if (!isTopResumedActivity) {
+            notificationManager.isAppForeground = false
+        }
+    }
+
+    override fun onPause() {
+        super.onPause()
+        notificationManager.isAppForeground = false
+    }
+
     override fun onStop() {
         super.onStop()
         notificationManager.isAppForeground = false
     }
 
+    override fun onDestroy() {
+        notificationManager.isAppForeground = false
+        super.onDestroy()
+    }
+
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
-        handleInviteIntent(intent)
+        handleServerOverrideIntent(intent)
         handleNotificationIntent(intent)
     }
 
@@ -112,50 +155,30 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun handleInviteIntent(intent: Intent?) {
+    internal fun handleServerOverrideIntent(intent: Intent?) {
         if (authStorage.isProvisioned()) {
-            Log.w("MainActivity", "Ignoring invite link and extras: client is already provisioned with an authenticated account")
             return
         }
 
         val data = intent?.data
-        if (data != null && data.scheme == "aster" && data.host == "join") {
-            val server = data.getQueryParameter("server")
-            if (!server.isNullOrBlank()) {
-                try {
-                    com.aster.app.data.network.NetworkConfig.serverUrl = server
-                    authStorage.saveServerUrl(server)
-                    Log.i("MainActivity", "Configured server endpoint from invite link: $server")
-                } catch (e: Exception) {
-                    Log.w("MainActivity", "Invalid server endpoint in invite link: $server", e)
-                }
-            }
-            val token = data.getQueryParameter("token")
-            if (!token.isNullOrBlank()) {
-                pendingInviteToken.value = token
-                pendingInviteError.value = null
+        val serverFromData = if (data != null && data.scheme == "aster") {
+            data.getQueryParameter("server")
+        } else null
+
+        val server = serverFromData ?: intent?.getStringExtra("aster_server")
+        if (!server.isNullOrBlank()) {
+            if (com.aster.app.data.network.NetworkConfig.currentEnvironment == com.aster.app.data.network.NetworkEnvironment.PRODUCTION &&
+                com.aster.app.data.network.NetworkConfig.isLocalOrDevelopmentEndpoint(server)
+            ) {
+                Log.w("MainActivity", "Ignoring stale/development server in PRODUCTION: $server")
             } else {
-                pendingInviteError.value = "Malformed invite link: missing token parameter"
-            }
-            return
-        }
-
-        intent?.getStringExtra("aster_server")?.let { server ->
-            if (server.isNotBlank()) {
                 try {
                     com.aster.app.data.network.NetworkConfig.serverUrl = server
                     authStorage.saveServerUrl(server)
-                    Log.i("MainActivity", "Configured server endpoint from intent extra: $server")
+                    Log.i("MainActivity", "Configured server endpoint from intent: $server")
                 } catch (e: Exception) {
-                    Log.w("MainActivity", "Invalid server extra: $server", e)
+                    Log.w("MainActivity", "Invalid server endpoint in intent: $server", e)
                 }
-            }
-        }
-
-        intent?.getStringExtra("aster_token")?.let { token ->
-            if (token.isNotBlank()) {
-                pendingInviteToken.value = token
-                pendingInviteError.value = null
             }
         }
     }

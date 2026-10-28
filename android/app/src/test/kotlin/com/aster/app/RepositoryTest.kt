@@ -19,6 +19,7 @@ import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -396,5 +397,106 @@ class RepositoryTest {
         assertNotNull(foundGroup)
         assertTrue(foundGroup!!.isGroup)
         assertEquals("Starlight Circle", foundGroup.title)
+    }
+
+    @Test
+    fun messageRepository_sendMessageToNonexistentConversation_ensuresConversationAndPersists() = runTest {
+        val convId = "conv_user_76609505bca143bc_user_b49d508015d141b9"
+        val senderId = "user_76609505bca143bc"
+        val recipientId = "user_b49d508015d141b9"
+
+        // Verify precondition: neither conversation nor recipient user exist in DB
+        assertNull(database.conversationDao().getConversationByIdOnce(convId))
+        assertNull(database.userDao().getUserByIdOnce(recipientId))
+
+        // Send first message in the brand-new conversation
+        val sentMessage = messageRepository.sendMessage(
+            conversationId = convId,
+            senderId = senderId,
+            body = "First message in brand new conversation"
+        )
+
+        // 1. Verify message returned with correct metadata
+        assertNotNull(sentMessage.id)
+        assertEquals(convId, sentMessage.conversationId)
+        assertEquals(senderId, sentMessage.senderId)
+        assertEquals("First message in brand new conversation", sentMessage.body)
+        assertEquals(MessageStatus.SENDING, sentMessage.status)
+
+        // 2. Verify conversation row exists in Room
+        val convEntity = database.conversationDao().getConversationByIdOnce(convId)
+        assertNotNull("Conversation entity must exist before message insertion", convEntity)
+        assertEquals(convId, convEntity!!.id)
+        assertFalse(convEntity.isGroup)
+
+        // 3. Verify sender and recipient users exist in Room
+        val senderUser = database.userDao().getUserByIdOnce(senderId)
+        assertNotNull("Sender user must exist in Room", senderUser)
+        val recipientUser = database.userDao().getUserByIdOnce(recipientId)
+        assertNotNull("Recipient user must exist in Room", recipientUser)
+
+        // 4. Verify conversation members exist
+        val members = database.conversationMemberDao().getMembersForConversationOnce(convId)
+        assertEquals(2, members.size)
+        assertTrue(members.any { it.id == senderId })
+        assertTrue(members.any { it.id == recipientId })
+
+        // 5. Verify message is persisted in Room
+        val messages = messageRepository.getMessages(convId).first()
+        assertEquals(1, messages.size)
+        assertEquals(sentMessage.id, messages[0].id)
+        assertEquals("First message in brand new conversation", messages[0].body)
+    }
+
+    @Test
+    fun messageRepository_sendSecondMessageInSameConversation_doesNotDuplicateConversation() = runTest {
+        val convId = "conv_user_alpha_user_beta"
+        val senderId = "user_alpha"
+
+        // First message creates conversation
+        val msg1 = messageRepository.sendMessage(convId, senderId, "First message")
+        val convAfterFirst = database.conversationDao().getConversationByIdOnce(convId)
+        assertNotNull(convAfterFirst)
+        val firstCreatedAt = convAfterFirst!!.createdAt
+
+        // Second message in the same conversation
+        val msg2 = messageRepository.sendMessage(convId, senderId, "Second message")
+
+        // Verify conversation entity is NOT duplicated or recreated
+        val convAfterSecond = database.conversationDao().getConversationByIdOnce(convId)
+        assertNotNull(convAfterSecond)
+        assertEquals(firstCreatedAt, convAfterSecond!!.createdAt)
+
+        // Verify messages list contains both messages
+        val messages = messageRepository.getMessages(convId).first()
+        assertEquals(2, messages.size)
+        assertEquals(msg1.id, messages[0].id)
+        assertEquals("First message", messages[0].body)
+        assertEquals(msg2.id, messages[1].id)
+        assertEquals("Second message", messages[1].body)
+    }
+
+    @Test
+    fun messageRepository_sendMessageToNonexistentGenericConversation_succeedsWithoutCrash() = runTest {
+        val convId = "custom_unformatted_conv_id"
+        val senderId = "user_unique_sender"
+
+        assertNull(database.conversationDao().getConversationByIdOnce(convId))
+
+        val sentMessage = messageRepository.sendMessage(
+            conversationId = convId,
+            senderId = senderId,
+            body = "Generic fallback test"
+        )
+
+        assertNotNull(sentMessage.id)
+        val convEntity = database.conversationDao().getConversationByIdOnce(convId)
+        assertNotNull(convEntity)
+        assertEquals(convId, convEntity!!.id)
+        assertEquals("Direct Chat", convEntity.title)
+
+        val messages = messageRepository.getMessages(convId).first()
+        assertEquals(1, messages.size)
+        assertEquals("Generic fallback test", messages[0].body)
     }
 }

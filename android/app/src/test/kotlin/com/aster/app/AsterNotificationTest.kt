@@ -83,6 +83,7 @@ class AsterNotificationTest {
 
     @After
     fun tearDown() {
+        messageRepository.cancelScope()
         database.close()
         notificationManager.dismissAllNotifications()
     }
@@ -176,6 +177,7 @@ class AsterNotificationTest {
 
     @Test
     fun showMessageNotification_suppressedWhenConversationIsActivelyViewed() {
+        notificationManager.isAppForeground = true
         notificationManager.setActiveConversation("conv_open_chat")
         assertEquals("conv_open_chat", notificationManager.getActiveConversation())
 
@@ -323,7 +325,8 @@ class AsterNotificationTest {
         val conv = ConversationEntity("c_active", "Active Chat", isGroup = false, createdAt = now, updatedAt = now)
         database.conversationDao().insertConversation(conv)
 
-        // Set conversation as actively viewed
+        // Set conversation as actively viewed in foreground
+        notificationManager.isAppForeground = true
         notificationManager.setActiveConversation("c_active")
 
         val serverMsg = ServerMessage.RelayMessage(
@@ -381,7 +384,8 @@ class AsterNotificationTest {
         // First delivery
         webSocketClient.emitIncomingMessageForTesting(serverMsg)
         for (i in 0 until 50) {
-            if (database.messageDao().getMessageById("msg_dup_1") != null) break
+            if (database.messageDao().getMessageById("msg_dup_1") != null &&
+                shadowNotificationManager.allNotifications.isNotEmpty()) break
             Thread.sleep(20)
         }
         assertEquals(1, database.messageDao().getUnreadCount("c_dup", "u_local3").first())
@@ -395,5 +399,165 @@ class AsterNotificationTest {
         assertEquals(1, database.messageDao().getUnreadCount("c_dup", "u_local3").first())
         // Notification count should not grow
         assertEquals(initialCount, shadowNotificationManager.allNotifications.size)
+    }
+
+    @Test
+    fun incomingMessage_whenAppBackgrounded_withOpenConversation_postsNotificationAndSetsDelivered() = runTest {
+        val now = System.currentTimeMillis()
+        val localUser = UserEntity("u_local_bg", "local_bg", "Local", isLocalUser = true, isOnline = true)
+        val sender = UserEntity("u_sender_bg", "sender_bg", "Sender", isLocalUser = false, isOnline = true)
+        database.userDao().insertUser(localUser)
+        database.userDao().insertUser(sender)
+
+        val conv = ConversationEntity("c_bg", "Background Chat", isGroup = false, createdAt = now, updatedAt = now)
+        database.conversationDao().insertConversation(conv)
+
+        // User opened chat c_bg, but then backgrounded the app (e.g. pressed Home)
+        notificationManager.setActiveConversation("c_bg")
+        notificationManager.isAppForeground = false
+
+        val serverMsg = ServerMessage.RelayMessage(
+            messageId = "msg_bg_1",
+            conversationId = "c_bg",
+            senderId = "u_sender_bg",
+            body = "Should alert in background even if chat was open",
+            timestamp = now
+        )
+
+        webSocketClient.emitIncomingMessageForTesting(serverMsg)
+        for (i in 0 until 50) {
+            if (database.messageDao().getMessageById("msg_bg_1") != null &&
+                shadowNotificationManager.allNotifications.isNotEmpty()) break
+            Thread.sleep(20)
+        }
+
+        val msg = database.messageDao().getMessageById("msg_bg_1")
+        assertNotNull("Message must be inserted into Room", msg)
+        assertEquals("Incoming message in background must have DELIVERED status", MessageStatus.DELIVERED, msg?.status)
+
+        val notif = shadowNotificationManager.allNotifications.firstOrNull {
+            it.extras.getCharSequence("android.title")?.toString() == "Sender"
+        }
+        assertNotNull("Notification MUST be posted when app is in background even if conversation is set as active", notif)
+        assertEquals("Should alert in background even if chat was open", notif?.extras?.getCharSequence("android.text")?.toString())
+    }
+
+    @Test
+    fun incomingMessage_whenAppInRecents_postsNotification() = runTest {
+        val now = System.currentTimeMillis()
+        val localUser = UserEntity("u_local_rec", "local_rec", "Local", isLocalUser = true, isOnline = true)
+        val sender = UserEntity("u_sender_rec", "sender_rec", "Sender", isLocalUser = false, isOnline = true)
+        database.userDao().insertUser(localUser)
+        database.userDao().insertUser(sender)
+
+        val conv = ConversationEntity("c_rec", "Recents Chat", isGroup = false, createdAt = now, updatedAt = now)
+        database.conversationDao().insertConversation(conv)
+
+        // Activity is in Recents overview (onPause called -> isAppForeground = false)
+        notificationManager.setActiveConversation("c_rec")
+        notificationManager.isAppForeground = false
+
+        val serverMsg = ServerMessage.RelayMessage(
+            messageId = "msg_rec_1",
+            conversationId = "c_rec",
+            senderId = "u_sender_rec",
+            body = "Recents delivery check",
+            timestamp = now
+        )
+
+        webSocketClient.emitIncomingMessageForTesting(serverMsg)
+        for (i in 0 until 50) {
+            if (database.messageDao().getMessageById("msg_rec_1") != null &&
+                shadowNotificationManager.allNotifications.isNotEmpty()) break
+            Thread.sleep(20)
+        }
+
+        val msg = database.messageDao().getMessageById("msg_rec_1")
+        assertNotNull("Message must be persisted", msg)
+        assertEquals("Incoming message in Recents must be DELIVERED", MessageStatus.DELIVERED, msg?.status)
+
+        val notif = shadowNotificationManager.allNotifications.firstOrNull {
+            it.extras.getCharSequence("android.title")?.toString() == "Sender"
+        }
+        assertNotNull("Notification MUST be posted when Aster is visible in Recents", notif)
+    }
+
+    @Test
+    fun incomingMessage_whenForegroundAndActivelyViewed_suppressesNotificationAndSetsRead() = runTest {
+        val now = System.currentTimeMillis()
+        val localUser = UserEntity("u_local_fg", "local_fg", "Local", isLocalUser = true, isOnline = true)
+        val sender = UserEntity("u_sender_fg", "sender_fg", "Sender", isLocalUser = false, isOnline = true)
+        database.userDao().insertUser(localUser)
+        database.userDao().insertUser(sender)
+
+        val conv = ConversationEntity("c_fg", "Foreground Chat", isGroup = false, createdAt = now, updatedAt = now)
+        database.conversationDao().insertConversation(conv)
+
+        // Active chat and user is looking at it in the foreground
+        notificationManager.isAppForeground = true
+        notificationManager.setActiveConversation("c_fg")
+
+        val serverMsg = ServerMessage.RelayMessage(
+            messageId = "msg_fg_1",
+            conversationId = "c_fg",
+            senderId = "u_sender_fg",
+            body = "Actively viewing message",
+            timestamp = now
+        )
+
+        webSocketClient.emitIncomingMessageForTesting(serverMsg)
+        for (i in 0 until 50) {
+            if (database.messageDao().getMessageById("msg_fg_1") != null) break
+            Thread.sleep(20)
+        }
+
+        val msg = database.messageDao().getMessageById("msg_fg_1")
+        assertNotNull("Message must be inserted into Room", msg)
+        assertEquals("Actively viewed message must be initialized as READ", MessageStatus.READ, msg?.status)
+
+        val notif = shadowNotificationManager.allNotifications.firstOrNull {
+            it.extras.getCharSequence("android.title")?.toString() == "Sender"
+        }
+        assertNull("Notification must be suppressed when conversation is actively viewed in foreground", notif)
+    }
+
+    @Test
+    fun incomingMessage_whenForegroundAndDifferentConversation_postsNotification() = runTest {
+        val now = System.currentTimeMillis()
+        val localUser = UserEntity("u_local_diff", "local_diff", "Local", isLocalUser = true, isOnline = true)
+        val sender = UserEntity("u_sender_diff", "sender_diff", "Alice", isLocalUser = false, isOnline = true)
+        database.userDao().insertUser(localUser)
+        database.userDao().insertUser(sender)
+
+        val conv = ConversationEntity("c_diff", "Alice Chat", isGroup = false, createdAt = now, updatedAt = now)
+        database.conversationDao().insertConversation(conv)
+
+        // User is in foreground, but in a DIFFERENT conversation (e.g. Bob's chat)
+        notificationManager.isAppForeground = true
+        notificationManager.setActiveConversation("c_bob")
+
+        val serverMsg = ServerMessage.RelayMessage(
+            messageId = "msg_diff_1",
+            conversationId = "c_diff",
+            senderId = "u_sender_diff",
+            body = "Hey from Alice while you are with Bob",
+            timestamp = now
+        )
+
+        webSocketClient.emitIncomingMessageForTesting(serverMsg)
+        for (i in 0 until 50) {
+            if (database.messageDao().getMessageById("msg_diff_1") != null &&
+                shadowNotificationManager.allNotifications.isNotEmpty()) break
+            Thread.sleep(20)
+        }
+
+        val msg = database.messageDao().getMessageById("msg_diff_1")
+        assertNotNull("Message must be persisted", msg)
+        assertEquals("Message from different conversation must be DELIVERED", MessageStatus.DELIVERED, msg?.status)
+
+        val notif = shadowNotificationManager.allNotifications.firstOrNull {
+            it.extras.getCharSequence("android.title")?.toString() == "Alice"
+        }
+        assertNotNull("Notification MUST be posted for a different conversation while app is in foreground", notif)
     }
 }

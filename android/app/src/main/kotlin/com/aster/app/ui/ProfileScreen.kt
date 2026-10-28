@@ -42,27 +42,39 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
+import com.aster.app.data.network.ConnectionState
+import com.aster.app.ui.components.AsterAvatar
 import com.aster.app.ui.components.AsterBottomNavigation
+import com.aster.app.ui.components.AsterCard
 import com.aster.app.ui.components.AsterNavDestination
 import com.aster.app.ui.components.ConstellationBackground
+import com.aster.app.ui.theme.AsterBorder
+import com.aster.app.ui.theme.AsterCrimson
 import com.aster.app.ui.theme.AsterElevated
 import com.aster.app.ui.theme.AsterGlow
+import com.aster.app.ui.theme.AsterMuted
 import com.aster.app.ui.theme.AsterNight
+import com.aster.app.ui.theme.AsterOnline
 import com.aster.app.ui.theme.AsterStar
 import com.aster.app.ui.theme.AsterSurface
+import com.aster.app.ui.theme.AsterSurfaceElevated
 import com.aster.app.ui.theme.AsterViolet
+import com.aster.app.ui.theme.AsterWarm
 
 @Composable
 fun ProfileScreen(
     onNavigate: (AsterNavDestination) -> Unit,
+    onNavigateToSettings: () -> Unit = {},
     viewModel: ProfileViewModel = hiltViewModel()
 ) {
     val uiState by viewModel.uiState.collectAsState()
@@ -121,12 +133,59 @@ fun ProfileScreen(
                     )
                 }
 
-                if (uiState.isLoading) {
-                    CircularProgressIndicator(
-                        modifier = Modifier.size(20.dp),
-                        color = AsterViolet,
-                        strokeWidth = 2.dp
-                    )
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    val (statusColor, statusText) = when (uiState.connectionState) {
+                        ConnectionState.CONNECTED -> Pair(AsterOnline, "Connected")
+                        ConnectionState.CONNECTING, ConnectionState.RECONNECTING -> Pair(AsterWarm, "Reconnecting…")
+                        ConnectionState.DISCONNECTED -> Pair(AsterCrimson, "Offline")
+                    }
+                    Box(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(AsterSurface)
+                            .border(0.75.dp, AsterBorder, RoundedCornerShape(12.dp))
+                            .padding(horizontal = 10.dp, vertical = 6.dp)
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Box(
+                                modifier = Modifier
+                                    .size(8.dp)
+                                    .clip(CircleShape)
+                                    .background(statusColor)
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text(
+                                text = statusText,
+                                color = statusColor,
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                        }
+                    }
+
+                    if (uiState.isLoading) {
+                        Spacer(modifier = Modifier.width(8.dp))
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(16.dp),
+                            color = AsterViolet,
+                            strokeWidth = 2.dp
+                        )
+                    }
+
+                    Spacer(modifier = Modifier.width(8.dp))
+
+                    Box(
+                        modifier = Modifier
+                            .size(36.dp)
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(AsterSurface)
+                            .border(0.75.dp, AsterBorder, RoundedCornerShape(10.dp))
+                            .clickable(onClick = onNavigateToSettings)
+                            .semantics { contentDescription = "Open Settings" },
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(text = "⚙", color = AsterStar, fontSize = 16.sp)
+                    }
                 }
             }
 
@@ -137,45 +196,42 @@ fun ProfileScreen(
                     .verticalScroll(rememberScrollState())
                     .padding(horizontal = 24.dp)
             ) {
-                // Aster ID Identity Card
+                // Aster ID Identity Card matching design reference
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
                         .clip(RoundedCornerShape(20.dp))
                         .background(AsterSurface)
-                        .border(1.dp, AsterViolet.copy(alpha = 0.4f), RoundedCornerShape(20.dp))
+                        .border(0.75.dp, AsterBorder, RoundedCornerShape(20.dp))
                         .padding(24.dp)
                 ) {
                     Column(
                         horizontalAlignment = Alignment.CenterHorizontally,
                         modifier = Modifier.fillMaxWidth()
                     ) {
-                        Box(
-                            modifier = Modifier
-                                .size(56.dp)
-                                .clip(CircleShape)
-                                .background(AsterElevated)
-                                .border(1.dp, AsterViolet, CircleShape),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Text(text = "✦", color = AsterViolet, fontSize = 24.sp, fontWeight = FontWeight.Bold)
-                        }
+                        AsterAvatar(
+                            name = uiState.displayName.ifBlank { "User" },
+                            size = 80.dp,
+                            isOnline = true
+                        )
 
-                        Spacer(modifier = Modifier.height(14.dp))
+                        Spacer(modifier = Modifier.height(16.dp))
 
                         Text(
                             text = uiState.displayName.ifBlank { "Beta Explorer" },
-                            style = MaterialTheme.typography.titleMedium.copy(
+                            style = MaterialTheme.typography.titleLarge.copy(
                                 color = AsterStar,
                                 fontWeight = FontWeight.Bold,
-                                fontSize = 18.sp
+                                fontSize = 20.sp
                             )
                         )
 
+                        Spacer(modifier = Modifier.height(2.dp))
+
                         Text(
                             text = "@${uiState.username.ifBlank { "anonymous" }}",
-                            style = MaterialTheme.typography.bodySmall.copy(
-                                color = AsterGlow.copy(alpha = 0.6f)
+                            style = MaterialTheme.typography.bodyMedium.copy(
+                                color = AsterMuted
                             )
                         )
 
@@ -186,7 +242,7 @@ fun ProfileScreen(
                             modifier = Modifier
                                 .clip(RoundedCornerShape(12.dp))
                                 .background(AsterNight.copy(alpha = 0.8f))
-                                .border(1.dp, AsterElevated, RoundedCornerShape(12.dp))
+                                .border(0.75.dp, AsterBorder, RoundedCornerShape(12.dp))
                                 .padding(horizontal = 20.dp, vertical = 12.dp),
                             contentAlignment = Alignment.Center
                         ) {
@@ -195,7 +251,7 @@ fun ProfileScreen(
                                 style = MaterialTheme.typography.headlineSmall.copy(
                                     color = AsterViolet,
                                     fontWeight = FontWeight.Bold,
-                                    letterSpacing = 2.5.sp
+                                    letterSpacing = 2.sp
                                 )
                             )
                         }
@@ -246,24 +302,21 @@ fun ProfileScreen(
                 Text(
                     text = "PROFILE SETTINGS",
                     style = MaterialTheme.typography.labelSmall.copy(
-                        color = AsterGlow.copy(alpha = 0.6f),
-                        letterSpacing = 1.sp
+                        color = AsterMuted,
+                        letterSpacing = 1.2.sp,
+                        fontWeight = FontWeight.SemiBold
                     )
                 )
 
                 Spacer(modifier = Modifier.height(8.dp))
 
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clip(RoundedCornerShape(14.dp))
-                        .background(AsterSurface)
-                        .padding(18.dp)
+                AsterCard(
+                    modifier = Modifier.fillMaxWidth()
                 ) {
-                    Column {
+                    Column(modifier = Modifier.padding(18.dp)) {
                         Text(
                             text = "Display Name",
-                            style = MaterialTheme.typography.bodySmall.copy(color = AsterGlow.copy(alpha = 0.7f))
+                            style = MaterialTheme.typography.bodySmall.copy(color = AsterMuted)
                         )
                         Spacer(modifier = Modifier.height(8.dp))
                         BasicTextField(
@@ -278,6 +331,7 @@ fun ProfileScreen(
                                         .fillMaxWidth()
                                         .clip(RoundedCornerShape(10.dp))
                                         .background(AsterElevated)
+                                        .border(0.75.dp, AsterBorder, RoundedCornerShape(10.dp))
                                         .padding(horizontal = 14.dp, vertical = 12.dp)
                                 ) {
                                     innerTextField()
@@ -289,8 +343,13 @@ fun ProfileScreen(
                             onClick = { viewModel.updateDisplayName(editDisplayName) },
                             enabled = editDisplayName.isNotBlank() && editDisplayName != uiState.displayName && !uiState.isSaving,
                             modifier = Modifier.align(Alignment.End),
-                            shape = RoundedCornerShape(8.dp),
-                            colors = ButtonDefaults.buttonColors(containerColor = AsterViolet, contentColor = AsterNight)
+                            shape = RoundedCornerShape(10.dp),
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = AsterViolet,
+                                contentColor = AsterNight,
+                                disabledContainerColor = AsterElevated,
+                                disabledContentColor = AsterMuted
+                            )
                         ) {
                             if (uiState.isSaving) {
                                 CircularProgressIndicator(modifier = Modifier.size(16.dp), color = AsterNight, strokeWidth = 2.dp)
@@ -307,42 +366,117 @@ fun ProfileScreen(
                 Text(
                     text = "ACCOUNT IDENTITY",
                     style = MaterialTheme.typography.labelSmall.copy(
-                        color = AsterGlow.copy(alpha = 0.6f),
-                        letterSpacing = 1.sp
+                        color = AsterMuted,
+                        letterSpacing = 1.2.sp,
+                        fontWeight = FontWeight.SemiBold
                     )
                 )
 
                 Spacer(modifier = Modifier.height(8.dp))
 
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clip(RoundedCornerShape(14.dp))
-                        .background(AsterSurface)
-                        .padding(18.dp)
+                AsterCard(
+                    modifier = Modifier.fillMaxWidth()
                 ) {
-                    Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
+                    Column(
+                        modifier = Modifier.padding(18.dp),
+                        verticalArrangement = Arrangement.spacedBy(14.dp)
+                    ) {
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.SpaceBetween
                         ) {
-                            Text(text = "Username", color = AsterGlow.copy(alpha = 0.7f), fontSize = 14.sp)
+                            Text(text = "Username", color = AsterMuted, fontSize = 14.sp)
                             Text(text = "@${uiState.username}", color = AsterStar, fontWeight = FontWeight.Medium, fontSize = 14.sp)
                         }
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.SpaceBetween
                         ) {
-                            Text(text = "Network Tier", color = AsterGlow.copy(alpha = 0.7f), fontSize = 14.sp)
-                            Text(text = "Private Beta", color = AsterViolet, fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
+                            Text(text = "Network Tier", color = AsterMuted, fontSize = 14.sp)
+                            Text(text = "Sovereign Beta", color = AsterViolet, fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
                         }
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.SpaceBetween
                         ) {
-                            Text(text = "Identity Model", color = AsterGlow.copy(alpha = 0.7f), fontSize = 14.sp)
+                            Text(text = "Identity Model", color = AsterMuted, fontSize = 14.sp)
                             Text(text = "Permanent Aster ID", color = AsterStar, fontSize = 14.sp)
                         }
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Text(text = "Client Version", color = AsterMuted, fontSize = 14.sp)
+                            Text(text = "v1.0 (Aster Sovereign)", color = AsterStar, fontSize = 14.sp)
+                        }
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Text(text = "Network Transport", color = AsterMuted, fontSize = 14.sp)
+                            Text(text = "Aster Secure Network", color = AsterViolet, fontSize = 14.sp)
+                        }
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(24.dp))
+
+                // System & Preferences Section
+                Text(
+                    text = "PREFERENCES & SYSTEM",
+                    style = MaterialTheme.typography.labelSmall.copy(
+                        color = AsterMuted,
+                        letterSpacing = 1.2.sp,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                )
+
+                Spacer(modifier = Modifier.height(8.dp))
+
+                AsterCard(
+                    modifier = Modifier.fillMaxWidth(),
+                    onClick = onNavigateToSettings
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(16.dp)
+                            .semantics { contentDescription = "Navigate to App Settings" },
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
+                            Box(
+                                modifier = Modifier
+                                    .size(38.dp)
+                                    .clip(CircleShape)
+                                    .background(AsterSurfaceElevated),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Text(text = "⚙", color = AsterViolet, fontSize = 18.sp)
+                            }
+                            Spacer(modifier = Modifier.width(14.dp))
+                            Column {
+                                Text(
+                                    text = "App Settings & Preferences",
+                                    color = AsterStar,
+                                    fontWeight = FontWeight.SemiBold,
+                                    fontSize = 15.sp
+                                )
+                                Spacer(modifier = Modifier.height(2.dp))
+                                Text(
+                                    text = "Appearance, notification policy, diagnostics & account",
+                                    color = AsterMuted,
+                                    fontSize = 12.sp
+                                )
+                            }
+                        }
+                        Text(
+                            text = "→",
+                            color = AsterMuted,
+                            fontSize = 18.sp,
+                            modifier = Modifier.padding(start = 8.dp)
+                        )
                     }
                 }
 

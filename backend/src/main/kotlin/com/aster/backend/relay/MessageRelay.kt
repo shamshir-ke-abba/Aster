@@ -711,6 +711,17 @@ class MessageRelay(
         session.send(Frame.Text(json))
     }
 
+    suspend fun notifyUser(userId: String, serverMsg: ServerMessage) {
+        val sessions = sessionManager.getSessions(userId)
+        for (session in sessions) {
+            try {
+                sendServerMessage(session, serverMsg)
+            } catch (e: Exception) {
+                logger.warn("Failed to deliver server message to user $userId: ${e.message}")
+            }
+        }
+    }
+
     fun handleDisconnect(session: WebSocketSession) {
         val userId = sessionManager.removeSession(session)
         if (userId != null) {

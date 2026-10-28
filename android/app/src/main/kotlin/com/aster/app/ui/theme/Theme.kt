@@ -3,56 +3,62 @@ package com.aster.app.ui.theme
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.ui.graphics.Color
+import com.aster.app.ui.motion.AsterHapticFeedback
+import com.aster.app.ui.motion.LocalAsterHaptics
+import com.aster.app.ui.motion.LocalReducedMotion
+import com.aster.app.ui.motion.rememberAsterHaptics
+import com.aster.app.ui.motion.rememberReducedMotionState
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Aster Material 3 Color Scheme
-//
-// Aster is a dark-only application — there is no light theme variant.
-// The Material3 color slots are mapped to Aster canonical color tokens.
+// Aster is exclusively dark mode — cosmic, sovereign, atmospheric.
 // ─────────────────────────────────────────────────────────────────────────────
 
 private val AsterColorScheme = darkColorScheme(
-    // Backgrounds
     background = AsterNight,
     surface = AsterSurface,
     surfaceVariant = AsterElevated,
 
-    // Primary (accent / interactive)
     primary = AsterViolet,
     onPrimary = AsterNight,
     primaryContainer = AsterElevated,
-    onPrimaryContainer = AsterGlow,
+    onPrimaryContainer = AsterViolet,
 
-    // Secondary (glow highlights)
     secondary = AsterGlow,
     onSecondary = AsterNight,
+    secondaryContainer = AsterSurfaceElevated,
+    onSecondaryContainer = AsterStar,
 
-    // On-colors (text over backgrounds)
     onBackground = AsterStar,
     onSurface = AsterStar,
-    onSurfaceVariant = AsterGlow,
+    onSurfaceVariant = AsterMuted,
 
-    // Outline
-    outline = AsterElevated,
-    outlineVariant = AsterSurface,
+    outline = AsterBorder,
+    outlineVariant = AsterElevated,
 
-    // Keep error colors at M3 defaults (red family) — no overrides needed.
-    error = Color(0xFFCF6679),
-    onError = Color(0xFF601410),
+    error = AsterCrimson,
+    onError = AsterStar,
+    errorContainer = Color(0xFF2E1216),
+    onErrorContainer = AsterCrimson
 )
 
-/**
- * Root Compose theme for the Aster application.
- *
- * Always dark — Aster has no light mode variant.
- * dynamicColor is intentionally disabled; Aster uses its own canonical palette.
- */
 @Composable
-fun AsterTheme(content: @Composable () -> Unit) {
-    MaterialTheme(
-        colorScheme = AsterColorScheme,
-        typography = AsterTypography,
-        content = content,
-    )
+fun AsterTheme(
+    reducedMotion: Boolean = rememberReducedMotionState(),
+    haptics: AsterHapticFeedback = rememberAsterHaptics(reducedMotion),
+    content: @Composable () -> Unit
+) {
+    CompositionLocalProvider(
+        LocalReducedMotion provides reducedMotion,
+        LocalAsterHaptics provides haptics
+    ) {
+        MaterialTheme(
+            colorScheme = AsterColorScheme,
+            typography = AsterTypography,
+            content = content,
+        )
+    }
 }
+

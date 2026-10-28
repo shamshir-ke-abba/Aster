@@ -251,6 +251,7 @@ class ViewModelTest {
         val errorState = viewModel.uiState.filter { it.errorMessage != null }.first()
         assertFalse(navigated)
         assertNotNull(errorState.errorMessage)
+        advanceUntilIdle()
     }
 
     @Test

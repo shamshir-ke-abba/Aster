@@ -7,18 +7,20 @@ import com.aster.app.data.network.AsterApiClient
 import com.aster.app.data.network.AsterWebSocketClient
 import com.aster.app.data.network.ConnectionState
 import com.aster.app.data.network.NetworkConfig
+import com.aster.app.data.local.AsterDatabase
 import dagger.hilt.android.lifecycle.HiltViewModel
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import javax.inject.Inject
 
 data class SettingsUiState(
     val asterId: String = "",
     val username: String = "",
     val displayName: String = "",
-    val serverUrl: String = "",
     val connectionState: ConnectionState = ConnectionState.DISCONNECTED,
     val viewMode: String = "CONSTELLATION",
     val readReceiptsEnabled: Boolean = true,
@@ -33,7 +35,10 @@ data class SettingsUiState(
 class SettingsViewModel @Inject constructor(
     private val apiClient: AsterApiClient,
     private val authStorage: AsterAuthStorage,
-    private val webSocketClient: AsterWebSocketClient
+    private val webSocketClient: AsterWebSocketClient,
+    private val database: AsterDatabase? = null,
+    @dagger.hilt.android.qualifiers.ApplicationContext private val context: android.content.Context? = null,
+    private val ioDispatcher: kotlinx.coroutines.CoroutineDispatcher = Dispatchers.IO
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(
@@ -41,7 +46,6 @@ class SettingsViewModel @Inject constructor(
             asterId = authStorage.getAsterId().orEmpty(),
             username = authStorage.getUsername().orEmpty(),
             displayName = authStorage.getDisplayName().orEmpty(),
-            serverUrl = NetworkConfig.serverUrl,
             viewMode = authStorage.getViewMode()
         )
     )
@@ -71,7 +75,10 @@ class SettingsViewModel @Inject constructor(
     fun logout(onComplete: () -> Unit) {
         viewModelScope.launch {
             _uiState.value = _uiState.value.copy(isLoggingOut = true)
-            apiClient.logout()
+            try {
+                apiClient.logout()
+            } catch (_: Exception) {}
+            context?.let { com.aster.app.service.AsterSyncService.stop(it) }
             webSocketClient.disconnect()
             authStorage.clearAuthToken()
             _uiState.value = _uiState.value.copy(isLoggingOut = false)
@@ -79,15 +86,35 @@ class SettingsViewModel @Inject constructor(
         }
     }
 
-    fun deleteAccount(onComplete: () -> Unit) {
+    fun deleteAccount(onSuccess: () -> Unit) {
         viewModelScope.launch {
-            _uiState.value = _uiState.value.copy(isDeletingAccount = true)
-            apiClient.deleteAccount()
-            webSocketClient.disconnect()
-            authStorage.clearAuthToken()
-            _uiState.value = _uiState.value.copy(isDeletingAccount = false)
-            onComplete()
+            _uiState.value = _uiState.value.copy(isDeletingAccount = true, errorMessage = null)
+            val result = apiClient.deleteAccount()
+            when (result) {
+                is com.aster.app.data.network.ApiResult.Success -> {
+                    context?.let { com.aster.app.service.AsterSyncService.stop(it) }
+                    webSocketClient.disconnect()
+                    authStorage.clearAuthToken()
+                    withContext(ioDispatcher) {
+                        try {
+                            database?.clearAllTables()
+                        } catch (_: Exception) {}
+                    }
+                    _uiState.value = _uiState.value.copy(isDeletingAccount = false)
+                    onSuccess()
+                }
+                is com.aster.app.data.network.ApiResult.Error -> {
+                    _uiState.value = _uiState.value.copy(
+                        isDeletingAccount = false,
+                        errorMessage = result.message ?: "Failed to delete account. Please check your network connection and try again."
+                    )
+                }
+            }
         }
+    }
+
+    fun clearErrorMessage() {
+        _uiState.value = _uiState.value.copy(errorMessage = null)
     }
 
     fun reconnect() {

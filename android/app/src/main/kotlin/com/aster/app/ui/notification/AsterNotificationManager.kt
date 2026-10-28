@@ -35,8 +35,10 @@ class AsterNotificationManager @Inject constructor(
 
     companion object {
         const val CHANNEL_ID_MESSAGES = "aster_messages"
+        const val CHANNEL_ID_SYNC = "aster_sync"
         const val GROUP_KEY_ASTER_MESSAGES = "com.aster.app.MESSAGES"
         const val EXTRA_CONVERSATION_ID = "conversation_id"
+        const val SYNC_NOTIFICATION_ID = 9001
         private const val SUMMARY_NOTIFICATION_ID = 1001
         private const val TAG = "AsterNotificationMgr"
     }
@@ -51,10 +53,11 @@ class AsterNotificationManager @Inject constructor(
     var previewPolicy: NotificationPreviewPolicy = NotificationPreviewPolicy.SHOW_PREVIEW
 
     /**
-     * Creates the notification channel on Android 8.0 (API 26) and above.
+     * Creates the notification channels on Android 8.0 (API 26) and above.
      */
     fun initChannels() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            // 1. High-priority channel for incoming chat messages
             val name = "Aster Messages"
             val descriptionText = "Incoming direct and constellation messages"
             val importance = NotificationManager.IMPORTANCE_HIGH
@@ -66,7 +69,49 @@ class AsterNotificationManager @Inject constructor(
             }
             notificationManager.createNotificationChannel(channel)
             Log.d(TAG, "Notification channel '$CHANNEL_ID_MESSAGES' initialized")
+
+            // 2. Low-priority / silent channel for persistent background sync service
+            val syncName = "Aster Connection"
+            val syncDescriptionText = "Keeps Aster connected to receive incoming messages"
+            val syncChannel = NotificationChannel(CHANNEL_ID_SYNC, syncName, NotificationManager.IMPORTANCE_LOW).apply {
+                description = syncDescriptionText
+                setShowBadge(false)
+                lockscreenVisibility = NotificationCompat.VISIBILITY_SECRET
+            }
+            notificationManager.createNotificationChannel(syncChannel)
+            Log.d(TAG, "Notification channel '$CHANNEL_ID_SYNC' initialized")
         }
+    }
+
+    /**
+     * Builds the persistent ongoing notification for AsterSyncService running in the foreground.
+     */
+    fun buildSyncNotification(): android.app.Notification {
+        initChannels()
+
+        val intent = Intent(context, MainActivity::class.java).apply {
+            action = Intent.ACTION_MAIN
+            addCategory(Intent.CATEGORY_LAUNCHER)
+            flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
+        }
+
+        val pendingIntent = PendingIntent.getActivity(
+            context,
+            SYNC_NOTIFICATION_ID,
+            intent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
+        return NotificationCompat.Builder(context, CHANNEL_ID_SYNC)
+            .setSmallIcon(R.drawable.ic_notification)
+            .setContentTitle("Aster")
+            .setContentText("Maintaining connection for incoming messages")
+            .setOngoing(true)
+            .setShowWhen(false)
+            .setPriority(NotificationCompat.PRIORITY_LOW)
+            .setCategory(NotificationCompat.CATEGORY_SERVICE)
+            .setContentIntent(pendingIntent)
+            .build()
     }
 
     /**
@@ -82,7 +127,7 @@ class AsterNotificationManager @Inject constructor(
 
     fun getActiveConversation(): String? = _activeConversationId.value
 
-    var isAppForeground: Boolean = true
+    var isAppForeground: Boolean = false
 
     /**
      * Dispatches an in-app system notification for an incoming direct or group message.

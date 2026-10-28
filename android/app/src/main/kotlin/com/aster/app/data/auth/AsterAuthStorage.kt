@@ -122,6 +122,13 @@ class AsterAuthStorage @Inject constructor(
         prefs.edit().putString("auth_display_name", displayName).apply()
     }
 
+    private val _viewModeFlow by lazy {
+        kotlinx.coroutines.flow.MutableStateFlow(getViewMode())
+    }
+    val viewModeFlow: kotlinx.coroutines.flow.StateFlow<String> by lazy {
+        _viewModeFlow
+    }
+
     @Synchronized
     fun getViewMode(): String {
         return prefs.getString("app_chat_view_mode", "CONSTELLATION") ?: "CONSTELLATION"
@@ -130,6 +137,7 @@ class AsterAuthStorage @Inject constructor(
     @Synchronized
     fun saveViewMode(mode: String) {
         prefs.edit().putString("app_chat_view_mode", mode).apply()
+        _viewModeFlow.value = mode
     }
 
     @Synchronized
@@ -155,6 +163,11 @@ class AsterAuthStorage @Inject constructor(
         if (url.isNotBlank()) {
             prefs.edit().putString("auth_server_url", url).apply()
         }
+    }
+
+    @Synchronized
+    fun clearServerUrl() {
+        prefs.edit().remove("auth_server_url").apply()
     }
 
     fun isProvisioned(): Boolean {

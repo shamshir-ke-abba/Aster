@@ -13,6 +13,14 @@ backend/.env
 backend/node_modules/
 backend/build/
 
+# Cloudflare / Node
+node_modules/
+.wrangler/
+dist/
+backend-cloudflare/node_modules/
+backend-cloudflare/.wrangler/
+backend-cloudflare/dist/
+
 # IDE / OS
 .idea/
 *.iml
@@ -27,12 +35,16 @@ backend/build/
 *.secret
 .env
 
-# Test artifacts / screenshots
+# Test artifacts / screenshots / dumps
 m7_*.png
 m8_*.png
 m9_*.png
 m10_*.png
 e2e_*.png
+phase*.png
+dump*.xml
+install
+uninstall
 *.db
 *.db-wal
 *.db-shm

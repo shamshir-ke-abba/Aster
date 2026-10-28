@@ -10,11 +10,11 @@ import kotlinx.coroutines.flow.Flow
 
 @Dao
 interface ConversationDao {
-    @Insert(onConflict = OnConflictStrategy.REPLACE)
-    suspend fun insertConversation(conversation: ConversationEntity)
+    @Insert(onConflict = OnConflictStrategy.IGNORE)
+    suspend fun insertConversation(conversation: ConversationEntity): Long
 
-    @Insert(onConflict = OnConflictStrategy.REPLACE)
-    suspend fun insertConversations(conversations: List<ConversationEntity>)
+    @Insert(onConflict = OnConflictStrategy.IGNORE)
+    suspend fun insertConversations(conversations: List<ConversationEntity>): List<Long>
 
     @Update
     suspend fun updateConversation(conversation: ConversationEntity)
@@ -43,6 +43,9 @@ interface ConversationDao {
         """
     )
     fun getConversationsForUser(userId: String): Flow<List<ConversationEntity>>
+
+    @Query("DELETE FROM conversations WHERE id = :conversationId")
+    suspend fun deleteConversation(conversationId: String)
 
     @Query("SELECT COUNT(*) FROM conversations")
     suspend fun getConversationCount(): Int

@@ -48,23 +48,33 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.aster.app.domain.model.sanitizeDisplayName
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.hilt.navigation.compose.hiltViewModel
+import com.aster.app.ui.motion.asterDialogTransition
+import com.aster.app.ui.motion.asterPressable
 import com.aster.app.domain.model.Conversation
 import com.aster.app.domain.model.User
+import com.aster.app.ui.components.AsterAvatar
 import com.aster.app.ui.components.AsterBottomNavigation
-import com.aster.app.ui.components.AsterLogo
+import com.aster.app.ui.components.AsterEmptyState
 import com.aster.app.ui.components.AsterNavDestination
+import com.aster.app.ui.components.AsterSearchField
 import com.aster.app.ui.components.ConstellationBackground
 import com.aster.app.ui.components.ConstellationChatView
+import com.aster.app.ui.theme.AsterBorder
 import com.aster.app.ui.theme.AsterCrimson
 import com.aster.app.ui.theme.AsterElevated
 import com.aster.app.ui.theme.AsterGlow
+import com.aster.app.ui.theme.AsterMuted
 import com.aster.app.ui.theme.AsterNight
+import com.aster.app.ui.theme.AsterOnline
 import com.aster.app.ui.theme.AsterStar
 import com.aster.app.ui.theme.AsterSurface
+import com.aster.app.ui.theme.AsterSurfaceElevated
 import com.aster.app.ui.theme.AsterViolet
+import com.aster.app.ui.theme.AsterWarm
 import java.text.SimpleDateFormat
 import java.util.Calendar
 import java.util.Date
@@ -86,6 +96,7 @@ fun HomeScreen(
     modifier: Modifier = Modifier,
     viewModel: HomeViewModel = hiltViewModel(),
     onNavigate: (AsterNavDestination) -> Unit = {},
+    onNavigateToSettings: () -> Unit = {},
     onConversationClick: (String) -> Unit
 ) {
     val uiState by viewModel.uiState.collectAsState()
@@ -94,6 +105,7 @@ fun HomeScreen(
         uiState = uiState,
         onConversationClick = onConversationClick,
         onNavigate = onNavigate,
+        onNavigateToSettings = onNavigateToSettings,
         onNewChatClick = viewModel::openNewChat,
         onCloseNewChat = viewModel::closeNewChat,
         onSelectUser = { userId ->
@@ -101,6 +113,18 @@ fun HomeScreen(
         },
         onCreateGroup = { name, memberIds ->
             viewModel.createGroup(name, memberIds, onConversationClick)
+        },
+        onSaveNodePosition = viewModel::saveNodePosition,
+        onToggleHighlight = viewModel::toggleHighlight,
+        onLeaveGroup = viewModel::leaveGroup,
+        onBlockUser = viewModel::blockUser,
+        onUnblockUser = viewModel::unblockUser,
+        onRemoveContact = viewModel::removeContact,
+        onAcceptPendingRequest = { reqId ->
+            viewModel.respondToFriendRequest(reqId, true)
+        },
+        onDeclinePendingRequest = { reqId ->
+            viewModel.respondToFriendRequest(reqId, false)
         },
         modifier = modifier
     )
@@ -111,15 +135,23 @@ fun HomeScreenContent(
     uiState: HomeUiState,
     onConversationClick: (String) -> Unit,
     onNavigate: (AsterNavDestination) -> Unit = {},
+    onNavigateToSettings: () -> Unit = {},
     onNewChatClick: () -> Unit = {},
     onCloseNewChat: () -> Unit = {},
     onSelectUser: (String) -> Unit = {},
     onCreateGroup: (String, List<String>) -> Unit = { _, _ -> },
+    onSaveNodePosition: (String, Float?, Float?) -> Unit = { _, _, _ -> },
+    onToggleHighlight: (String, Boolean) -> Unit = { _, _ -> },
+    onLeaveGroup: (String) -> Unit = {},
+    onBlockUser: (String) -> Unit = {},
+    onUnblockUser: (String) -> Unit = {},
+    onRemoveContact: (String) -> Unit = {},
+    onAcceptPendingRequest: (String) -> Unit = {},
+    onDeclinePendingRequest: (String) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val statusBarPadding = WindowInsets.statusBars.asPaddingValues()
     val navBarPadding = WindowInsets.navigationBars.asPaddingValues()
-    var viewMode by remember { mutableStateOf("CONSTELLATION") }
     var activeFilter by remember { mutableStateOf(ChatFilter.ALL) }
     var searchQuery by remember { mutableStateOf("") }
 
@@ -155,21 +187,29 @@ fun HomeScreenContent(
             HomeHeader(
                 displayName = uiState.localUser?.displayName.orEmpty(),
                 connectionState = uiState.connectionState,
+                onNavigateToSettings = onNavigateToSettings,
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(horizontal = 24.dp, vertical = 12.dp)
             )
 
-            // View Mode Toggle & Title Bar
+            if (uiState.connectionState == com.aster.app.data.network.ConnectionState.DISCONNECTED) {
+                OfflineTipCard(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 24.dp, vertical = 4.dp)
+                )
+            }
+
+            // Title Bar (Chat mode is managed exclusively in Settings)
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(horizontal = 24.dp, vertical = 4.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceBetween
+                verticalAlignment = Alignment.CenterVertically
             ) {
                 Text(
-                    text = if (viewMode == "CONSTELLATION") "Constellation Map" else "Conversations",
+                    text = if (uiState.viewMode == "CONSTELLATION") "Constellation Map" else "Conversations",
                     style = MaterialTheme.typography.labelSmall.copy(
                         color = AsterGlow.copy(alpha = 0.8f),
                         letterSpacing = 1.5.sp,
@@ -177,92 +217,23 @@ fun HomeScreenContent(
                     ),
                     modifier = Modifier.semantics { heading() }
                 )
-
-                // View Mode Pill Toggle
-                Row(
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(8.dp))
-                        .background(AsterElevated)
-                        .padding(2.dp)
-                ) {
-                    Box(
-                        modifier = Modifier
-                            .clip(RoundedCornerShape(6.dp))
-                            .background(if (viewMode == "CONSTELLATION") AsterViolet else Color.Transparent)
-                            .clickable { viewMode = "CONSTELLATION" }
-                            .padding(horizontal = 8.dp, vertical = 4.dp)
-                    ) {
-                        Text(
-                            text = "✦ Map",
-                            color = if (viewMode == "CONSTELLATION") AsterNight else AsterGlow.copy(alpha = 0.7f),
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.SemiBold
-                        )
-                    }
-                    Box(
-                        modifier = Modifier
-                            .clip(RoundedCornerShape(6.dp))
-                            .background(if (viewMode == "LIST") AsterViolet else Color.Transparent)
-                            .clickable { viewMode = "LIST" }
-                            .padding(horizontal = 8.dp, vertical = 4.dp)
-                    ) {
-                        Text(
-                            text = "☰ List",
-                            color = if (viewMode == "LIST") AsterNight else AsterGlow.copy(alpha = 0.7f),
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.SemiBold
-                        )
-                    }
-                }
             }
 
             // Search Bar
-            Box(
+            AsterSearchField(
+                query = searchQuery,
+                onQueryChange = { searchQuery = it },
+                placeholder = "Filter chats...",
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(horizontal = 24.dp, vertical = 4.dp)
-                    .clip(RoundedCornerShape(10.dp))
-                    .background(AsterSurface)
-                    .border(0.5.dp, AsterElevated, RoundedCornerShape(10.dp))
-                    .padding(horizontal = 12.dp, vertical = 8.dp)
-            ) {
-                BasicTextField(
-                    value = searchQuery,
-                    onValueChange = { searchQuery = it },
-                    textStyle = MaterialTheme.typography.bodySmall.copy(color = AsterStar, fontSize = 13.sp),
-                    cursorBrush = SolidColor(AsterViolet),
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth(),
-                    decorationBox = { innerTextField ->
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Text(text = "🔍 ", fontSize = 12.sp)
-                            Box(modifier = Modifier.weight(1f)) {
-                                if (searchQuery.isEmpty()) {
-                                    Text(
-                                        text = "Filter chats...",
-                                        style = MaterialTheme.typography.bodySmall.copy(color = AsterGlow.copy(alpha = 0.4f))
-                                    )
-                                }
-                                innerTextField()
-                            }
-                            if (searchQuery.isNotEmpty()) {
-                                Text(
-                                    text = "✕",
-                                    color = AsterGlow.copy(alpha = 0.6f),
-                                    fontSize = 12.sp,
-                                    modifier = Modifier.clickable { searchQuery = "" }
-                                )
-                            }
-                        }
-                    }
-                )
-            }
+            )
 
             // Filter Chips: All | Direct | Groups
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 24.dp, vertical = 4.dp),
+                    .padding(horizontal = 24.dp, vertical = 6.dp),
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 ChatFilter.values().forEach { filter ->
@@ -280,15 +251,15 @@ fun HomeScreenContent(
                     Box(
                         modifier = Modifier
                             .clip(RoundedCornerShape(8.dp))
-                            .background(if (isSelected) AsterElevated else Color.Transparent)
-                            .border(0.5.dp, if (isSelected) AsterViolet.copy(alpha = 0.6f) else AsterElevated, RoundedCornerShape(8.dp))
+                            .background(if (isSelected) AsterSurfaceElevated else AsterSurface)
+                            .border(0.75.dp, if (isSelected) AsterViolet else AsterBorder, RoundedCornerShape(8.dp))
                             .clickable { activeFilter = filter }
-                            .padding(horizontal = 10.dp, vertical = 4.dp)
+                            .padding(horizontal = 12.dp, vertical = 5.dp)
                     ) {
                         Text(
                             text = title,
-                            color = if (isSelected) AsterViolet else AsterGlow.copy(alpha = 0.6f),
-                            fontSize = 11.sp,
+                            color = if (isSelected) AsterViolet else AsterMuted,
+                            fontSize = 12.sp,
                             fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Normal
                         )
                     }
@@ -297,22 +268,60 @@ fun HomeScreenContent(
 
             HorizontalDivider(
                 modifier = Modifier.padding(horizontal = 24.dp, vertical = 4.dp),
-                thickness = 0.5.dp,
-                color = AsterElevated
+                thickness = 0.75.dp,
+                color = AsterBorder
             )
 
             // Main Chat Area: Constellation Canvas vs List
-            if (filteredConversations.isEmpty() && !uiState.isLoading) {
-                EmptyConstellationState(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .weight(1f)
-                )
-            } else if (viewMode == "CONSTELLATION") {
+            if (filteredConversations.isEmpty() && uiState.incomingFriendRequests.isEmpty() && !uiState.isLoading) {
+                if (searchQuery.isNotBlank()) {
+                    AsterEmptyState(
+                        title = "No chats found",
+                        description = "No conversations match \"$searchQuery\"",
+                        icon = "🔍",
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .weight(1f)
+                    )
+                } else if (activeFilter == ChatFilter.GROUPS) {
+                    AsterEmptyState(
+                        title = "No group chats",
+                        description = "Create a group constellation with the + button above.",
+                        icon = "✦",
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .weight(1f)
+                    )
+                } else if (activeFilter == ChatFilter.DIRECT) {
+                    AsterEmptyState(
+                        title = "No direct chats",
+                        description = "Direct conversations with your contacts will appear here.",
+                        icon = "✦",
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .weight(1f)
+                    )
+                } else {
+                    EmptyConstellationState(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .weight(1f)
+                    )
+                }
+            } else if (uiState.viewMode == "CONSTELLATION") {
                 ConstellationChatView(
                     conversations = filteredConversations,
                     currentUserId = uiState.localUser?.id.orEmpty(),
+                    pendingRequests = uiState.incomingFriendRequests,
+                    onAcceptPendingRequest = onAcceptPendingRequest,
+                    onDeclinePendingRequest = onDeclinePendingRequest,
                     onConversationClick = onConversationClick,
+                    onSaveNodePosition = onSaveNodePosition,
+                    onToggleHighlight = onToggleHighlight,
+                    onLeaveGroup = onLeaveGroup,
+                    onBlockUser = onBlockUser,
+                    onUnblockUser = onUnblockUser,
+                    onRemoveContact = onRemoveContact,
                     modifier = Modifier
                         .fillMaxSize()
                         .weight(1f)
@@ -337,6 +346,39 @@ fun HomeScreenContent(
                         bottom = navBarPadding.calculateBottomPadding() + 84.dp
                     )
                 ) {
+                    if (uiState.incomingFriendRequests.isNotEmpty()) {
+                        item {
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 24.dp, vertical = 6.dp)
+                                    .clip(RoundedCornerShape(12.dp))
+                                    .background(AsterWarm.copy(alpha = 0.12f))
+                                    .border(0.75.dp, AsterWarm.copy(alpha = 0.4f), RoundedCornerShape(12.dp))
+                                    .clickable { onNavigate(AsterNavDestination.CONNECTIONS) }
+                                    .padding(horizontal = 16.dp, vertical = 10.dp)
+                            ) {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Text(text = "✧", color = AsterWarm, fontSize = 16.sp)
+                                    Spacer(modifier = Modifier.width(10.dp))
+                                    Text(
+                                        text = "${uiState.incomingFriendRequests.size} pending connection request${if (uiState.incomingFriendRequests.size > 1) "s" else ""}",
+                                        color = AsterStar,
+                                        fontSize = 13.sp,
+                                        fontWeight = FontWeight.Medium,
+                                        modifier = Modifier.weight(1f)
+                                    )
+                                    Text(
+                                        text = "View ⚯",
+                                        color = AsterWarm,
+                                        fontSize = 12.sp,
+                                        fontWeight = FontWeight.SemiBold
+                                    )
+                                }
+                            }
+                        }
+                    }
+
                     items(
                         items = filteredConversations,
                         key = { it.id }
@@ -411,6 +453,7 @@ private fun NewChatDialog(
         Box(
             modifier = Modifier
                 .fillMaxWidth(0.9f)
+                .asterDialogTransition()
                 .clip(RoundedCornerShape(20.dp))
                 .background(AsterSurface)
                 .border(0.5.dp, AsterElevated, RoundedCornerShape(20.dp))
@@ -708,9 +751,48 @@ private fun NewChatDialog(
 }
 
 @Composable
+private fun OfflineTipCard(modifier: Modifier = Modifier) {
+    Box(
+        modifier = modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(12.dp))
+            .background(Color(0xFF241416))
+            .border(1.dp, Color(0xFF4E2226), RoundedCornerShape(12.dp))
+            .padding(horizontal = 14.dp, vertical = 10.dp)
+    ) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(8.dp)
+                    .clip(CircleShape)
+                    .background(Color(0xFFFF5252))
+            )
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = "Tip: You're offline",
+                    color = Color(0xFFFF8A80),
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.SemiBold
+                )
+                Text(
+                    text = "Messages will be delivered automatically when internet connectivity returns.",
+                    color = AsterGlow.copy(alpha = 0.75f),
+                    fontSize = 11.sp,
+                    lineHeight = 15.sp
+                )
+            }
+        }
+    }
+}
+
+@Composable
 private fun HomeHeader(
     displayName: String,
     connectionState: com.aster.app.data.network.ConnectionState = com.aster.app.data.network.ConnectionState.CONNECTED,
+    onNavigateToSettings: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val greeting = rememberTimeGreeting()
@@ -721,9 +803,10 @@ private fun HomeHeader(
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
-            // Personal greeting per design spec: "Good evening, Saad"
+            // Personal greeting: "Good afternoon, Saad" or "Good afternoon"
             Column {
-                val greetingText = if (displayName.isNotBlank()) "$greeting, $displayName" else greeting
+                val cleanName = sanitizeDisplayName(displayName)
+                val greetingText = if (!cleanName.isNullOrBlank()) "$greeting, $cleanName" else greeting
                 Text(
                     text = greetingText,
                     style = MaterialTheme.typography.bodyLarge.copy(
@@ -731,38 +814,59 @@ private fun HomeHeader(
                         fontWeight = FontWeight.Normal
                     )
                 )
-                if (connectionState != com.aster.app.data.network.ConnectionState.CONNECTED) {
-                    val statusText = when (connectionState) {
-                        com.aster.app.data.network.ConnectionState.CONNECTING -> "connecting..."
-                        com.aster.app.data.network.ConnectionState.RECONNECTING -> "reconnecting..."
-                        com.aster.app.data.network.ConnectionState.DISCONNECTED -> "offline"
-                        else -> ""
-                    }
-                    if (statusText.isNotEmpty()) {
-                        Text(
-                            text = statusText,
-                            style = MaterialTheme.typography.labelSmall.copy(
-                                color = AsterGlow.copy(alpha = 0.5f),
-                                fontSize = 11.sp
-                            )
+
+                // Clean status indicator
+                val (dotColor, statusText) = when (connectionState) {
+                    com.aster.app.data.network.ConnectionState.CONNECTED -> Pair(Color(0xFF4CAF50), "Connected")
+                    com.aster.app.data.network.ConnectionState.CONNECTING,
+                    com.aster.app.data.network.ConnectionState.RECONNECTING -> Pair(Color(0xFFFFB300), "Reconnecting…")
+                    com.aster.app.data.network.ConnectionState.DISCONNECTED -> Pair(Color(0xFFFF5252), "Offline")
+                }
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.padding(top = 2.dp)
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(6.dp)
+                            .clip(CircleShape)
+                            .background(dotColor)
+                    )
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text(
+                        text = statusText,
+                        style = MaterialTheme.typography.labelSmall.copy(
+                            color = when (connectionState) {
+                                com.aster.app.data.network.ConnectionState.DISCONNECTED -> Color(0xFFFF8A80)
+                                com.aster.app.data.network.ConnectionState.RECONNECTING,
+                                com.aster.app.data.network.ConnectionState.CONNECTING -> Color(0xFFFFD54F)
+                                else -> AsterGlow.copy(alpha = 0.6f)
+                            },
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Medium
                         )
-                    }
+                    )
                 }
             }
 
-            // Minimalist branding with small Aster logo
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(6.dp)
-            ) {
-                AsterLogo(size = 18.dp)
-                Text(
-                    text = "ASTER",
-                    style = MaterialTheme.typography.labelSmall.copy(
-                        color = AsterStar,
-                        letterSpacing = 3.sp,
-                        fontWeight = FontWeight.Light
+            // Permanent Settings access (replaces old Aster logo branding)
+            Box(
+                modifier = Modifier
+                    .size(48.dp)
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(AsterSurface)
+                    .border(0.75.dp, AsterBorder, RoundedCornerShape(12.dp))
+                    .clickable(
+                        onClick = onNavigateToSettings,
+                        onClickLabel = "Open Settings"
                     )
+                    .semantics { contentDescription = "Open Settings" },
+                contentAlignment = Alignment.Center
+            ) {
+                Text(
+                    text = "⚙",
+                    color = AsterStar,
+                    fontSize = 20.sp
                 )
             }
         }
@@ -774,112 +878,128 @@ private fun ConversationItem(
     conversation: Conversation,
     onClick: () -> Unit
 ) {
-    val isOnline = conversation.otherMember?.isOnline ?: false
+    val isBlocked = !conversation.isGroup && conversation.otherMember?.isBlocked == true
+    val isDeleted = !conversation.isGroup && conversation.otherMember?.isDeleted == true
+    val titleText = if (isDeleted) "Deleted User" else conversation.title
+    val isOnline = !isDeleted && !isBlocked && (conversation.otherMember?.isOnline ?: false)
 
-    Row(
+    Column(
         modifier = Modifier
             .fillMaxWidth()
-            .heightIn(min = 68.dp)
-            .clickable(onClick = onClick)
-            .padding(horizontal = 24.dp, vertical = 10.dp),
-        verticalAlignment = Alignment.CenterVertically
+            .asterPressable(onClick = onClick)
     ) {
-        // Presence indicator: ✦✦ for group, ✦ for online direct, · for offline direct
-        Box(
-            modifier = Modifier.size(24.dp),
-            contentAlignment = Alignment.Center
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 20.dp, vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically
         ) {
-            if (conversation.isGroup) {
-                Text(
-                    text = "✦✦",
-                    color = AsterViolet,
-                    fontSize = 11.sp,
-                    fontWeight = FontWeight.Bold
-                )
-            } else if (isOnline) {
-                Text(
-                    text = "✦",
-                    color = AsterViolet,
-                    fontSize = 16.sp
-                )
-            } else {
-                Text(
-                    text = "·",
-                    color = AsterGlow.copy(alpha = 0.5f),
-                    fontSize = 20.sp,
-                    fontWeight = FontWeight.Bold
-                )
-            }
-        }
-
-        Spacer(modifier = Modifier.width(12.dp))
-
-        // Title and snippet preview
-        Column(
-            modifier = Modifier.weight(1f)
-        ) {
-            Text(
-                text = conversation.title,
-                style = MaterialTheme.typography.bodyLarge.copy(
-                    color = AsterStar,
-                    fontWeight = FontWeight.Medium
-                ),
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis
+            // Aster avatar with initials, online presence and unread badge
+            AsterAvatar(
+                name = titleText,
+                size = 46.dp,
+                isOnline = isOnline && !conversation.isGroup,
+                unreadCount = 0 // unread badge shown on right
             )
 
-            Spacer(modifier = Modifier.height(2.dp))
+            Spacer(modifier = Modifier.width(14.dp))
 
-            val lastMessageText = conversation.lastMessage?.body ?: "No messages yet"
-            Text(
-                text = lastMessageText,
-                style = MaterialTheme.typography.bodyMedium.copy(
-                    color = if (conversation.unreadCount > 0) AsterStar else AsterGlow.copy(alpha = 0.7f),
-                    fontWeight = if (conversation.unreadCount > 0) FontWeight.Medium else FontWeight.Normal
-                ),
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis
-            )
-        }
-
-        Spacer(modifier = Modifier.width(12.dp))
-
-        // Timestamp and unread count
-        Column(
-            horizontalAlignment = Alignment.End,
-            verticalArrangement = Arrangement.Center
-        ) {
-            val timestampText = conversation.lastMessage?.createdAt?.let { formatMessageTime(it) } ?: ""
-            if (timestampText.isNotEmpty()) {
-                Text(
-                    text = timestampText,
-                    style = MaterialTheme.typography.labelSmall.copy(
-                        color = AsterGlow.copy(alpha = 0.6f),
-                        fontSize = 11.sp
-                    )
-                )
-            }
-
-            if (conversation.unreadCount > 0) {
-                Spacer(modifier = Modifier.height(4.dp))
-                Box(
-                    modifier = Modifier
-                        .clip(CircleShape)
-                        .background(AsterCrimson)
-                        .padding(horizontal = 7.dp, vertical = 2.dp),
-                    contentAlignment = Alignment.Center
-                ) {
+            // Title and last message snippet
+            Column(
+                modifier = Modifier.weight(1f)
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(
-                        text = conversation.unreadCount.toString(),
-                        style = MaterialTheme.typography.labelSmall.copy(
+                        text = titleText,
+                        style = MaterialTheme.typography.titleSmall.copy(
                             color = AsterStar,
-                            fontWeight = FontWeight.Bold,
-                            fontSize = 10.sp
+                            fontWeight = FontWeight.SemiBold,
+                            fontSize = 15.sp
+                        ),
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f, fill = false)
+                    )
+
+                    if (conversation.isGroup) {
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(
+                            text = "✦✦",
+                            color = AsterViolet,
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(3.dp))
+
+                val lastMessageText = if (isDeleted) {
+                    "This user no longer exists"
+                } else if (isBlocked) {
+                    "Blocked"
+                } else if (conversation.lastMessage?.status == com.aster.app.domain.model.MessageStatus.UNSENT) {
+                    "This message was unsent"
+                } else {
+                    conversation.lastMessage?.body ?: "No messages yet"
+                }
+                Text(
+                    text = lastMessageText,
+                    style = MaterialTheme.typography.bodySmall.copy(
+                        color = if (conversation.unreadCount > 0) AsterStar else AsterGlow.copy(alpha = 0.75f),
+                        fontWeight = if (conversation.unreadCount > 0) FontWeight.Medium else FontWeight.Normal,
+                        fontSize = 13.sp
+                    ),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+
+            Spacer(modifier = Modifier.width(10.dp))
+
+            // Timestamp and violet unread pill badge
+            Column(
+                horizontalAlignment = Alignment.End,
+                verticalArrangement = Arrangement.Center
+            ) {
+                val timestampText = conversation.lastMessage?.createdAt?.let { formatMessageTime(it) } ?: ""
+                if (timestampText.isNotEmpty()) {
+                    Text(
+                        text = timestampText,
+                        style = MaterialTheme.typography.labelSmall.copy(
+                            color = AsterGlow.copy(alpha = 0.6f),
+                            fontSize = 11.sp
                         )
                     )
                 }
+
+                if (conversation.unreadCount > 0) {
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Box(
+                        modifier = Modifier
+                            .clip(CircleShape)
+                            .background(AsterViolet)
+                            .padding(horizontal = 7.dp, vertical = 2.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            text = conversation.unreadCount.toString(),
+                            style = MaterialTheme.typography.labelSmall.copy(
+                                color = AsterNight,
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 10.sp
+                            )
+                        )
+                    }
+                }
             }
         }
+
+        HorizontalDivider(
+            modifier = Modifier.padding(start = 80.dp, end = 20.dp),
+            thickness = 0.5.dp,
+            color = AsterBorder
+        )
     }
 }
 
@@ -887,29 +1007,12 @@ private fun ConversationItem(
 private fun EmptyConstellationState(
     modifier: Modifier = Modifier
 ) {
-    Column(
+    AsterEmptyState(
+        title = "Your constellation is quiet",
+        description = "Conversations with your trusted circle will appear here.",
+        icon = "✦",
         modifier = modifier
-            .padding(32.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.Center
-    ) {
-        AsterLogo(size = 48.dp)
-        Spacer(modifier = Modifier.height(20.dp))
-        Text(
-            text = "Your constellation is quiet",
-            style = MaterialTheme.typography.bodyLarge.copy(
-                color = AsterStar,
-                fontWeight = FontWeight.Normal
-            )
-        )
-        Spacer(modifier = Modifier.height(8.dp))
-        Text(
-            text = "Conversations with your trusted circle will appear here.",
-            style = MaterialTheme.typography.bodyMedium.copy(
-                color = AsterGlow.copy(alpha = 0.6f)
-            )
-        )
-    }
+    )
 }
 
 @Composable
