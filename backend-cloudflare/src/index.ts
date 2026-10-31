@@ -152,6 +152,46 @@ export default {
       return errorResponse("Must specify token, userId, or deviceId", 400);
     }
 
+    if (pathname === "/api/admin/purge-account" && method === "POST") {
+      const adminErr = checkAdminAccess(request, env);
+      if (adminErr) return adminErr;
+
+      let body: any;
+      try {
+        body = await request.json();
+      } catch {
+        return errorResponse("Invalid JSON", 400);
+      }
+
+      const userId = body.userId?.trim();
+      const userIds: string[] = Array.isArray(body.userIds)
+        ? body.userIds
+        : userId
+        ? [userId]
+        : [];
+
+      if (userIds.length === 0) {
+        return errorResponse("Must specify userId or userIds array", 400);
+      }
+
+      const purged: string[] = [];
+      for (const uid of userIds) {
+        if (typeof uid === "string" && ProtocolLimits.USER_ID_REGEX.test(uid.trim())) {
+          await relayStub.purgeAccount(uid.trim());
+          purged.push(uid.trim());
+        }
+      }
+
+      return jsonResponse({ status: "ok", purgedCount: purged.length, purged });
+    }
+
+    if (pathname === "/api/admin/users" && method === "GET") {
+      const adminErr = checkAdminAccess(request, env);
+      if (adminErr) return adminErr;
+      const allUsers = await relayStub.listAllUsersAdmin();
+      return jsonResponse({ status: "ok", count: allUsers.length, users: allUsers });
+    }
+
     // -------------------------------------------------------------------------
     // Public Authentication & Registration
     // -------------------------------------------------------------------------

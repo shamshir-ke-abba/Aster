@@ -5,6 +5,7 @@ import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.dp
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
+import androidx.lifecycle.viewModelScope
 import com.aster.app.data.auth.AsterAuthStorage
 import com.aster.app.data.local.AsterDatabase
 import com.aster.app.data.network.AsterApiClient
@@ -33,6 +34,7 @@ import com.aster.app.ui.components.worldBoxToScreenBox
 import com.aster.app.ui.components.OffScreenConversation
 import androidx.compose.ui.geometry.Offset
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.cancelChildren
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.first
@@ -59,7 +61,7 @@ import kotlin.math.hypot
 @Config(sdk = [34])
 class ConstellationLayoutAndChatModeTest {
 
-    private val testDispatcher = StandardTestDispatcher()
+    private var testDispatcher = StandardTestDispatcher()
     private lateinit var context: Context
     private lateinit var authStorage: AsterAuthStorage
     private lateinit var database: AsterDatabase
@@ -71,6 +73,7 @@ class ConstellationLayoutAndChatModeTest {
 
     @Before
     fun setup() {
+        testDispatcher = StandardTestDispatcher()
         Dispatchers.setMain(testDispatcher)
         context = ApplicationProvider.getApplicationContext()
         database = Room.inMemoryDatabaseBuilder(context, AsterDatabase::class.java)
@@ -100,12 +103,17 @@ class ConstellationLayoutAndChatModeTest {
             messageDao = database.messageDao(),
             authStorage = authStorage
         )
+        com.aster.app.data.network.NetworkConfig.currentEnvironment = com.aster.app.data.network.NetworkEnvironment.DEVELOPMENT_UNSECURED_LOCAL
     }
 
     @After
     fun tearDown() {
+        com.aster.app.data.network.NetworkConfig.resetToDefault(com.aster.app.data.network.NetworkEnvironment.PRODUCTION)
+        testDispatcher.cancelChildren()
         Dispatchers.resetMain()
-        database.close()
+        if (::database.isInitialized) {
+            database.close()
+        }
     }
 
     private fun createSampleConversations(numDirect: Int, numGroups: Int): List<Conversation> {
@@ -308,6 +316,7 @@ class ConstellationLayoutAndChatModeTest {
 
         val state2 = homeViewModel.uiState.filter { !it.isLoading && it.viewMode == "CONSTELLATION" }.first()
         assertEquals("Home must reactively update to CONSTELLATION", "CONSTELLATION", state2.viewMode)
+        homeViewModel.viewModelScope.coroutineContext.cancelChildren()
     }
 
     @Test
@@ -327,8 +336,10 @@ class ConstellationLayoutAndChatModeTest {
             authStorage = freshAuthStorage
         )
 
+        advanceUntilIdle()
         val state = freshHomeViewModel.uiState.filter { !it.isLoading }.first()
         assertEquals("Fresh HomeViewModel must load persisted mode", "LIST", state.viewMode)
+        freshHomeViewModel.viewModelScope.coroutineContext.cancelChildren()
     }
 
     // --- Phase 4.3 Zoom, Pan & Off-Screen Awareness Tests ---

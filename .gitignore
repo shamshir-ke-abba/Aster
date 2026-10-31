@@ -33,9 +33,15 @@ backend-cloudflare/dist/
 *.key
 *.p12
 *.secret
+*.pk8
+*.der
+*signing.properties
+*keystore.properties
 .env
 
 # Test artifacts / screenshots / dumps
+artifacts/
+backups/
 m7_*.png
 m8_*.png
 m9_*.png

@@ -1,3 +1,7 @@
+import java.io.File
+import java.io.FileInputStream
+import java.util.Properties
+
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
@@ -18,10 +22,72 @@ android {
         versionName = "1.0"
     }
 
+    val keystorePropertiesFile = rootProject.file("keystore.properties")
+    val appKeystorePropertiesFile = project.file("keystore.properties")
+    val releaseProperties = Properties().apply {
+        if (keystorePropertiesFile.exists()) {
+            FileInputStream(keystorePropertiesFile).use { load(it) }
+        } else if (appKeystorePropertiesFile.exists()) {
+            FileInputStream(appKeystorePropertiesFile).use { load(it) }
+        }
+    }
+
+    val releaseStoreFile: String? = System.getenv("ASTER_KEYSTORE_PATH")
+        ?: (project.findProperty("ASTER_KEYSTORE_PATH") as? String)
+        ?: releaseProperties.getProperty("storeFile")
+        ?: releaseProperties.getProperty("keystore.path")
+
+    val releaseStorePassword: String? = System.getenv("ASTER_KEYSTORE_PASSWORD")
+        ?: (project.findProperty("ASTER_KEYSTORE_PASSWORD") as? String)
+        ?: releaseProperties.getProperty("storePassword")
+        ?: releaseProperties.getProperty("keystore.password")
+
+    val releaseKeyAlias: String? = System.getenv("ASTER_KEY_ALIAS")
+        ?: (project.findProperty("ASTER_KEY_ALIAS") as? String)
+        ?: releaseProperties.getProperty("keyAlias")
+        ?: releaseProperties.getProperty("key.alias")
+
+    val releaseKeyPassword: String? = System.getenv("ASTER_KEY_PASSWORD")
+        ?: (project.findProperty("ASTER_KEY_PASSWORD") as? String)
+        ?: releaseProperties.getProperty("keyPassword")
+        ?: releaseProperties.getProperty("key.password")
+
+    val resolvedStoreFile: File? = if (!releaseStoreFile.isNullOrBlank()) {
+        val rawFile = File(releaseStoreFile)
+        if (rawFile.isAbsolute && rawFile.exists()) {
+            rawFile
+        } else {
+            listOf(
+                file(releaseStoreFile),
+                rootProject.file(releaseStoreFile),
+                rootProject.file("../$releaseStoreFile")
+            ).firstOrNull { it.exists() }
+        }
+    } else null
+
+    val hasReleaseSigning = resolvedStoreFile != null &&
+        !releaseStorePassword.isNullOrBlank() &&
+        !releaseKeyAlias.isNullOrBlank() &&
+        !releaseKeyPassword.isNullOrBlank()
+
+    signingConfigs {
+        if (hasReleaseSigning) {
+            create("release") {
+                storeFile = resolvedStoreFile!!
+                storePassword = releaseStorePassword
+                keyAlias = releaseKeyAlias
+                keyPassword = releaseKeyPassword
+            }
+        }
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = false
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
+            if (hasReleaseSigning) {
+                signingConfig = signingConfigs.getByName("release")
+            }
         }
     }
 
@@ -36,6 +102,7 @@ android {
 
     buildFeatures {
         compose = true
+        buildConfig = true
     }
 
     // composeOptions block is NOT needed with Kotlin 2 — the compose compiler

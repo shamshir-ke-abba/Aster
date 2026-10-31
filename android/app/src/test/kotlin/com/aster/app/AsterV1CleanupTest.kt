@@ -408,4 +408,29 @@ class AsterV1CleanupTest {
         assertEquals("req_push_77", updateEvent.requestId)
         assertEquals("ACCEPTED", updateEvent.status)
     }
+
+    @Test
+    fun test_productionEnvironment_neverSeedsMockData() = runTest {
+        com.aster.app.data.network.NetworkConfig.resetToDefault(com.aster.app.data.network.NetworkEnvironment.PRODUCTION)
+        val seedInitializer = com.aster.app.data.seed.DatabaseSeedInitializer(
+            userDao = database.userDao(),
+            conversationDao = database.conversationDao(),
+            conversationMemberDao = database.conversationMemberDao(),
+            messageDao = database.messageDao(),
+            authStorage = authStorage
+        )
+
+        seedInitializer.initializeIfNeeded()
+
+        // Verify zero mock contacts or dummy conversations are inserted in PRODUCTION
+        val rohan = database.userDao().getUserByIdOnce("user_rohan")
+        val alex = database.userDao().getUserByIdOnce("user_alex")
+        val sam = database.userDao().getUserByIdOnce("user_sam")
+        val convAlex = database.conversationDao().getConversationByIdOnce("conv_alex")
+
+        org.junit.Assert.assertNull("Rohan mock contact must not be seeded in PRODUCTION", rohan)
+        org.junit.Assert.assertNull("Alex mock contact must not be seeded in PRODUCTION", alex)
+        org.junit.Assert.assertNull("Sam mock contact must not be seeded in PRODUCTION", sam)
+        org.junit.Assert.assertNull("Alex conversation must not be seeded in PRODUCTION", convAlex)
+    }
 }

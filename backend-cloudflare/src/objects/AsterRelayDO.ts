@@ -225,27 +225,6 @@ export class AsterRelayDO extends DurableObject<Env> {
     } catch {
       // Ignored if PRAGMA is not supported or columns exist
     }
-
-    // Seed test accounts matching Aster reference baseline
-    const now = Date.now();
-    const defaultKnown = [
-      ["user_saad", "AST-SAAD01", "saad", "Saad"],
-      ["user_alex", "AST-ALEX01", "alex", "Alex"],
-      ["user_rohan", "AST-ROHAN1", "rohan", "Rohan"],
-      ["user_priya", "AST-PRIYA1", "priya", "Priya"],
-    ];
-    for (const [uid, aid, un, dn] of defaultKnown) {
-      this.ctx.storage.sql.exec(
-        `INSERT OR IGNORE INTO users (user_id, aster_id, username, display_name, created_at, updated_at, is_active)
-         VALUES (?, ?, ?, ?, ?, ?, 1)`,
-        uid,
-        aid,
-        un,
-        dn,
-        now,
-        now
-      );
-    }
   }
 
   // ---------------------------------------------------------------------------
@@ -2181,6 +2160,54 @@ export class AsterRelayDO extends DurableObject<Env> {
     this.broadcastPresence(userId, false, 0);
 
     return true;
+  }
+
+  async purgeAccount(userId: string): Promise<boolean> {
+    const groupRows = this.ctx.storage.sql.exec(
+      `SELECT group_id FROM user_groups WHERE user_id = ?`,
+      userId
+    ).toArray() as any[];
+
+    for (const gr of groupRows) {
+      try {
+        const groupStub = this.getGroupStub(gr.group_id);
+        await groupStub.removeMember(gr.group_id, userId, userId);
+      } catch (_) {}
+    }
+
+    for (const ws of this.ctx.getWebSockets()) {
+      const attach = this.getSocketAttachment(ws);
+      if (attach.userId === userId) {
+        try {
+          this.sendServerMessage(ws, {
+            type: "ERROR",
+            code: "ACCOUNT_DELETED",
+            message: "Your account has been purged",
+          });
+          ws.close(4000, "Account purged");
+        } catch (_) {}
+      }
+    }
+
+    this.ctx.storage.sql.exec(`DELETE FROM auth_tokens WHERE user_id = ?`, userId);
+    this.ctx.storage.sql.exec(`DELETE FROM friend_requests WHERE sender_user_id = ? OR recipient_user_id = ?`, userId, userId);
+    this.ctx.storage.sql.exec(`DELETE FROM push_tokens WHERE user_id = ?`, userId);
+    this.ctx.storage.sql.exec(`DELETE FROM blocked_users WHERE blocker_user_id = ? OR blocked_user_id = ?`, userId, userId);
+    this.ctx.storage.sql.exec(`DELETE FROM user_groups WHERE user_id = ?`, userId);
+    this.ctx.storage.sql.exec(`DELETE FROM mailbox_messages WHERE sender_user_id = ? OR recipient_user_id = ?`, userId, userId);
+    this.ctx.storage.sql.exec(`DELETE FROM message_reactions WHERE user_id = ?`, userId);
+    this.ctx.storage.sql.exec(`DELETE FROM mailbox_reactions WHERE recipient_user_id = ? OR user_id = ?`, userId, userId);
+    this.ctx.storage.sql.exec(`DELETE FROM message_reads WHERE reader_user_id = ?`, userId);
+    this.ctx.storage.sql.exec(`DELETE FROM unsent_messages WHERE sender_user_id = ?`, userId);
+    this.ctx.storage.sql.exec(`DELETE FROM users WHERE user_id = ?`, userId);
+
+    return true;
+  }
+
+  async listAllUsersAdmin(): Promise<any[]> {
+    return this.ctx.storage.sql.exec(
+      `SELECT user_id, aster_id, username, display_name, is_active, is_deleted, created_at FROM users`
+    ).toArray();
   }
 
   async createToken(userId: string, deviceId: string): Promise<string> {

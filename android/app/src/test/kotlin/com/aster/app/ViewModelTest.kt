@@ -82,10 +82,12 @@ class ViewModelTest {
             messageDao = database.messageDao(),
             authStorage = authStorage
         )
+        com.aster.app.data.network.NetworkConfig.currentEnvironment = com.aster.app.data.network.NetworkEnvironment.DEVELOPMENT_UNSECURED_LOCAL
     }
 
     @After
     fun tearDown() {
+        com.aster.app.data.network.NetworkConfig.resetToDefault(com.aster.app.data.network.NetworkEnvironment.PRODUCTION)
         Dispatchers.resetMain()
         database.close()
     }

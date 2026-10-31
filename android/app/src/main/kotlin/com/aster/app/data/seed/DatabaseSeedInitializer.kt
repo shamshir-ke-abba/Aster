@@ -29,8 +29,18 @@ class DatabaseSeedInitializer @Inject constructor(
     private val authStorage: com.aster.app.data.auth.AsterAuthStorage
 ) {
 
-    suspend fun initializeIfNeeded() = withContext(Dispatchers.IO) {
+    suspend fun initializeIfNeeded(forceDevSeed: Boolean = false) = withContext(Dispatchers.IO) {
         val currentAuthUserId = authStorage.getAuthenticatedUserId()
+
+        // Development/sample data must NEVER be seeded in PRODUCTION
+        if (com.aster.app.data.network.NetworkConfig.currentEnvironment == com.aster.app.data.network.NetworkEnvironment.PRODUCTION && !forceDevSeed) {
+            if (!currentAuthUserId.isNullOrBlank()) {
+                userDao.setLocalUser(currentAuthUserId)
+            } else {
+                userDao.clearLocalUser()
+            }
+            return@withContext
+        }
 
         if (userDao.getUserByIdOnce("user_rohan") != null) {
             // Already initialized; sync local user with authenticated state safely
